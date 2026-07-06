@@ -1,0 +1,1 @@
+ALTER TABLE `quotation_items` ADD `itemType` enum('inventory','labor','custom') DEFAULT 'inventory' NOT NULL;

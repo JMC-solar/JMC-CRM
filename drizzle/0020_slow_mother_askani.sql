@@ -1,0 +1,1 @@
+ALTER TABLE `quotations` ADD `discountManualAmount` decimal(12,2);

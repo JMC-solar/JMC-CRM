@@ -1,0 +1,20 @@
+CREATE TABLE `net_metering` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`projectId` int,
+	`clientName` varchar(200) NOT NULL,
+	`projectName` varchar(200),
+	`address` text,
+	`sizeOfSetup` varchar(50),
+	`typeOfSetup` varchar(100),
+	`status` enum('plan_drawings','submitted_lgu','submitted_fire','submitted_electric','approved','completed_energized') NOT NULL DEFAULT 'plan_drawings',
+	`electricCompany` varchar(200),
+	`applicationNumber` varchar(100),
+	`notes` text,
+	`submittedDate` timestamp,
+	`approvedDate` timestamp,
+	`completedDate` timestamp,
+	`createdBy` int,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `net_metering_id` PRIMARY KEY(`id`)
+);
