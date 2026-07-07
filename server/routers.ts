@@ -2,7 +2,6 @@ import { COOKIE_NAME } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
-import { getDb } from "./db";
 import {
   getUserById, getUserByUsername, listUsersRaw, createUser, updateUser, deleteUser,
 } from "./firestore-users";
@@ -25,6 +24,7 @@ import type {
   AuditLog as FsAuditLog,
   Account,
   Contact,
+  Lead,
   Opportunity,
   Activity,
   Supplier,
@@ -54,11 +54,6 @@ import type {
 } from "./models";
 import { money } from "./models";
 import { z } from "zod";
-import { eq, and, sql, count } from "drizzle-orm";
-import {
-  leads, contacts, accounts, opportunities,
-  inventoryItems, quotations, projectPayments,
-} from "../drizzle/schema";
 
 /** Recomputes a BOM package's totalCost from its line items' quantity * inventory sellingPrice. */
 async function recalcBomTotalCost(packageId: number): Promise<void> {
@@ -117,73 +112,92 @@ export const appRouter = router({
   // ============ DASHBOARD ============
   dashboard: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb();
-      if (!db) return { totalLeads: 0, totalOpportunities: 0, totalInventoryItems: 0, totalQuotations: 0, pipelineValue: 0, wonDeals: 0, totalContacts: 0, lowStockItems: 0, conversionRate: 0, totalRevenue: 0, inventoryValue: 0 };
+      const [leadsCountSnap, contactsCountSnap, quotesCountSnap, opportunityRows, inventoryRows] = await Promise.all([
+        fdb().collection("leads").count().get(),
+        fdb().collection("contacts").count().get(),
+        fdb().collection("quotations").count().get(),
+        fsListAll<Opportunity>("opportunities", { select: ["status", "value"] }),
+        fsListAll<InventoryItem>("inventory_items", { select: ["stockOnHand", "reorderLevel", "sellingPrice"] }),
+      ]);
 
-      const [leadsCount] = await db.select({ c: count() }).from(leads);
-      const [oppsCount] = await db.select({ c: count() }).from(opportunities);
-      const [itemsCount] = await db.select({ c: count() }).from(inventoryItems);
-      const [quotesCount] = await db.select({ c: count() }).from(quotations);
-      const [contactsCount] = await db.select({ c: count() }).from(contacts);
-      const [pipelineVal] = await db.select({ total: sql<string>`COALESCE(SUM(value), 0)` }).from(opportunities).where(and(sql`status NOT IN ('won', 'lost')`));
-      const [wonResult] = await db.select({ c: count(), total: sql<string>`COALESCE(SUM(value), 0)` }).from(opportunities).where(eq(opportunities.status, "won"));
-      const lowStockResult = await db.select({ c: count() }).from(inventoryItems).where(sql`stockOnHand <= reorderLevel`);
-      const [invValue] = await db.select({ total: sql<string>`COALESCE(SUM(stockOnHand * sellingPrice), 0)` }).from(inventoryItems);
-      
+      let pipelineValue = 0;
+      let wonDeals = 0;
+      for (const o of opportunityRows) {
+        if (o.status === "won") wonDeals++;
+        else if (o.status !== "lost") pipelineValue += Number(o.value || 0);
+      }
+      const totalOpps = opportunityRows.length;
+
+      let lowStockItems = 0;
+      let inventoryValue = 0;
+      for (const item of inventoryRows) {
+        if (item.reorderLevel != null && item.stockOnHand <= item.reorderLevel) lowStockItems++;
+        inventoryValue += item.stockOnHand * Number(item.sellingPrice || 0);
+      }
+
       // Only fetch revenue for admin users
       let totalRevenue = "0";
       if (ctx.user?.role === "admin") {
-        const [revenueResult] = await db.select({ total: sql<string>`COALESCE(SUM(amount), 0)` }).from(projectPayments);
-        totalRevenue = revenueResult.total || "0";
+        const paymentRows = await fsListAll<ProjectPayment>("project_payments", { select: ["amount"] });
+        totalRevenue = money(paymentRows.reduce((sum, p) => sum + Number(p.amount || 0), 0));
       }
-      
-      const totalOpps = oppsCount.c || 0;
-      const wonDeals = wonResult.c || 0;
+
       const conversionRate = totalOpps > 0 ? Math.round((wonDeals / totalOpps) * 100) : 0;
 
       return {
-        totalLeads: leadsCount.c || 0,
+        totalLeads: leadsCountSnap.data().count,
         totalOpportunities: totalOpps,
-        totalInventoryItems: itemsCount.c || 0,
-        totalQuotations: quotesCount.c || 0,
-        pipelineValue: pipelineVal.total || "0",
+        totalInventoryItems: inventoryRows.length,
+        totalQuotations: quotesCountSnap.data().count,
+        pipelineValue: money(pipelineValue),
         wonDeals,
-        totalContacts: contactsCount.c || 0,
-        lowStockItems: lowStockResult[0]?.c || 0,
+        totalContacts: contactsCountSnap.data().count,
+        lowStockItems,
         conversionRate,
         totalRevenue,
-        inventoryValue: invValue.total || "0",
+        inventoryValue: money(inventoryValue),
       };
     }),
     pipelineBreakdown: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({ status: opportunities.status, count: count() }).from(opportunities).groupBy(opportunities.status);
-      return result.map(r => ({ status: r.status, count: r.count }));
+      const rows = await fsListAll<Opportunity>("opportunities", { select: ["status"] });
+      const counts = new Map<string, number>();
+      for (const r of rows) counts.set(r.status, (counts.get(r.status) || 0) + 1);
+      return Array.from(counts.entries()).map(([status, count]) => ({ status, count }));
     }),
     inventoryByCategory: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({ category: inventoryItems.category, count: count(), totalStock: sql<string>`SUM(stockOnHand)` }).from(inventoryItems).groupBy(inventoryItems.category);
-      return result.map(r => ({ category: r.category, count: r.count, totalStock: Number(r.totalStock) || 0 }));
+      const rows = await fsListAll<InventoryItem>("inventory_items", { select: ["category", "stockOnHand"] });
+      const byCategory = new Map<string, { count: number; totalStock: number }>();
+      for (const r of rows) {
+        const entry = byCategory.get(r.category) || { count: 0, totalStock: 0 };
+        entry.count++;
+        entry.totalStock += r.stockOnHand || 0;
+        byCategory.set(r.category, entry);
+      }
+      return Array.from(byCategory.entries()).map(([category, v]) => ({ category, count: v.count, totalStock: v.totalStock }));
     }),
     revenueByMonth: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
       if (ctx.user?.role !== "admin") return [];
-      const result = await db.select({
-        month: sql<string>`DATE_FORMAT(paymentDate, '%Y-%m')`,
-        revenue: sql<string>`COALESCE(SUM(amount), 0)`,
-        count: count(),
-      }).from(projectPayments).groupBy(sql`DATE_FORMAT(paymentDate, '%Y-%m')`).orderBy(sql`DATE_FORMAT(paymentDate, '%Y-%m')`).limit(12);
-      return result.map(r => ({ month: r.month, revenue: Number(r.revenue) || 0, count: r.count }));
+      const rows = await fsListAll<ProjectPayment>("project_payments", { select: ["paymentDate", "amount"] });
+      const byMonth = new Map<string, { revenue: number; count: number }>();
+      for (const p of rows) {
+        const d = p.paymentDate;
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        const entry = byMonth.get(key) || { revenue: 0, count: 0 };
+        entry.revenue += Number(p.amount || 0);
+        entry.count++;
+        byMonth.set(key, entry);
+      }
+      return Array.from(byMonth.entries())
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .slice(0, 12)
+        .map(([month, v]) => ({ month, revenue: v.revenue, count: v.count }));
     }),
     leadConversion: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
       const statuses = ["new", "contacted", "qualified", "proposal", "won", "lost"] as const;
-      const result = await db.select({ status: leads.status, count: count() }).from(leads).groupBy(leads.status);
-      return statuses.map(s => ({ status: s, count: result.find(r => r.status === s)?.count || 0 }));
+      const rows = await fsListAll<Lead>("leads", { select: ["status"] });
+      const counts = new Map<string, number>();
+      for (const r of rows) counts.set(r.status, (counts.get(r.status) || 0) + 1);
+      return statuses.map(s => ({ status: s, count: counts.get(s) || 0 }));
     }),
   }),
 

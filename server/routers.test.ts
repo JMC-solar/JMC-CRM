@@ -210,6 +210,124 @@ describe("appRouter", () => {
     });
   });
 
+  // ============ DASHBOARD ============
+  describe("dashboard", () => {
+    beforeEach(() => {
+      vi.mocked(firestore.listAll).mockReset();
+      vi.mocked(firestore.fdb).mockReset();
+    });
+
+    function mockAggregateCounts(counts: Record<string, number>) {
+      const db: any = {
+        collection(name: string) {
+          return {
+            count() {
+              return { async get() { return { data: () => ({ count: counts[name] ?? 0 }) }; } };
+            },
+          };
+        },
+      };
+      vi.mocked(firestore.fdb).mockReturnValue(db);
+    }
+
+    it("stats aggregates counts, SUMs, and the reorderLevel low-stock compare in memory, gating revenue by role", async () => {
+      mockAggregateCounts({ leads: 3, contacts: 4, quotations: 5 });
+      vi.mocked(firestore.listAll).mockImplementation(async (coll: any) => {
+        if (coll === "opportunities") return [
+          { id: 1, status: "new", value: "100.00" },
+          { id: 2, status: "won", value: "200.00" },
+          { id: 3, status: "lost", value: "300.00" },
+          { id: 4, status: "proposal", value: "50.50" },
+        ] as any;
+        if (coll === "inventory_items") return [
+          { id: 1, stockOnHand: 2, reorderLevel: 5, sellingPrice: "10.00" }, // low stock
+          { id: 2, stockOnHand: 10, reorderLevel: 5, sellingPrice: "20.00" }, // not low
+          { id: 3, stockOnHand: 1, reorderLevel: null, sellingPrice: "5.00" }, // null reorderLevel never counts as low
+        ] as any;
+        if (coll === "project_payments") return [
+          { id: 1, amount: "500.00" },
+          { id: 2, amount: "250.25" },
+        ] as any;
+        return [];
+      });
+
+      const adminResult = await appRouter.createCaller(createAuthContext("admin")).dashboard.stats();
+      expect(adminResult).toEqual({
+        totalLeads: 3,
+        totalOpportunities: 4,
+        totalInventoryItems: 3,
+        totalQuotations: 5,
+        pipelineValue: "150.50", // new(100) + proposal(50.50); excludes won/lost
+        wonDeals: 1,
+        totalContacts: 4,
+        lowStockItems: 1,
+        conversionRate: 25, // 1 won / 4 total
+        totalRevenue: "750.25",
+        inventoryValue: "225.00", // 2*10 + 10*20 + 1*5
+      });
+
+      const staffResult = await appRouter.createCaller(createAuthContext("staff")).dashboard.stats();
+      expect(staffResult.totalRevenue).toBe("0");
+    });
+
+    it("pipelineBreakdown groups opportunities by status via an in-memory reduce", async () => {
+      vi.mocked(firestore.listAll).mockResolvedValueOnce([
+        { status: "new" }, { status: "new" }, { status: "won" },
+      ] as any);
+      const result = await appRouter.createCaller(createAuthContext()).dashboard.pipelineBreakdown();
+      expect(firestore.listAll).toHaveBeenCalledWith("opportunities", { select: ["status"] });
+      expect(result).toEqual([{ status: "new", count: 2 }, { status: "won", count: 1 }]);
+    });
+
+    it("inventoryByCategory groups by category with counts and summed stock", async () => {
+      vi.mocked(firestore.listAll).mockResolvedValueOnce([
+        { category: "panels", stockOnHand: 5 },
+        { category: "panels", stockOnHand: 3 },
+        { category: "inverters", stockOnHand: 2 },
+      ] as any);
+      const result = await appRouter.createCaller(createAuthContext()).dashboard.inventoryByCategory();
+      expect(firestore.listAll).toHaveBeenCalledWith("inventory_items", { select: ["category", "stockOnHand"] });
+      expect(result).toEqual([
+        { category: "panels", count: 2, totalStock: 8 },
+        { category: "inverters", count: 1, totalStock: 2 },
+      ]);
+    });
+
+    it("revenueByMonth is admin-gated and groups+sorts ascending capped at 12 months", async () => {
+      const staffResult = await appRouter.createCaller(createAuthContext("staff")).dashboard.revenueByMonth();
+      expect(staffResult).toEqual([]);
+      expect(firestore.listAll).not.toHaveBeenCalled();
+
+      vi.mocked(firestore.listAll).mockResolvedValueOnce([
+        { paymentDate: new Date("2024-02-15"), amount: "100.00" },
+        { paymentDate: new Date("2024-01-10"), amount: "50.00" },
+        { paymentDate: new Date("2024-01-20"), amount: "25.00" },
+      ] as any);
+      const result = await appRouter.createCaller(createAuthContext("admin")).dashboard.revenueByMonth();
+      expect(firestore.listAll).toHaveBeenCalledWith("project_payments", { select: ["paymentDate", "amount"] });
+      expect(result).toEqual([
+        { month: "2024-01", revenue: 75, count: 2 },
+        { month: "2024-02", revenue: 100, count: 1 },
+      ]);
+    });
+
+    it("leadConversion zero-fills all six statuses", async () => {
+      vi.mocked(firestore.listAll).mockResolvedValueOnce([
+        { status: "new" }, { status: "new" }, { status: "won" },
+      ] as any);
+      const result = await appRouter.createCaller(createAuthContext()).dashboard.leadConversion();
+      expect(firestore.listAll).toHaveBeenCalledWith("leads", { select: ["status"] });
+      expect(result).toEqual([
+        { status: "new", count: 2 },
+        { status: "contacted", count: 0 },
+        { status: "qualified", count: 0 },
+        { status: "proposal", count: 0 },
+        { status: "won", count: 1 },
+        { status: "lost", count: 0 },
+      ]);
+    });
+  });
+
   // ============ CRM Firestore routers (Batch 2a) ============
   describe("leads/contacts/accounts/opportunities/activities/config/suppliers", () => {
     beforeEach(() => {
