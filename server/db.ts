@@ -1,8 +1,8 @@
-import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import mysql from "mysql2";
-import { InsertUser, users } from "../drizzle/schema";
-import { ENV } from './_core/env';
+import { ENV } from "./_core/env";
+import { getUserByOpenId as fsGetUserByOpenId, createUser, updateUser } from "./firestore-users";
+import type { User } from "./models";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _pool: mysql.Pool | null = null;
@@ -23,6 +23,8 @@ function createPool() {
 }
 
 // Lazily create the drizzle instance with proper pool settings for serverless.
+// NOTE: still used by unmigrated routers (non-user domains). Do not remove
+// until every router has moved to Firestore.
 export async function getDb() {
   const now = Date.now();
   if (!_db && process.env.DATABASE_URL) {
@@ -53,75 +55,63 @@ export async function getDb() {
   return _db;
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
+// ============================================================
+// User helpers — migrated to Firestore (server/firestore-users.ts).
+// Re-exported here so existing callers (server/_core/sdk.ts, etc.) don't
+// need to change their import path.
+// ============================================================
+
+export async function upsertUser(user: {
+  openId: string;
+  name?: string | null;
+  email?: string | null;
+  loginMethod?: string | null;
+  lastSignedIn?: Date;
+  role?: User["role"];
+}): Promise<void> {
   if (!user.openId) {
     throw new Error("User openId is required for upsert");
   }
 
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
-  }
-
   try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
+    const existing = await fsGetUserByOpenId(user.openId);
 
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
+    const patch: Record<string, unknown> = {};
+    (["name", "email", "loginMethod"] as const).forEach(field => {
       const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
+      if (value !== undefined) {
+        patch[field] = value ?? null;
+      }
+    });
 
     if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
+      patch.lastSignedIn = user.lastSignedIn;
     }
     if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
+      patch.role = user.role;
     } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
+      patch.role = "admin";
     }
 
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
+    if (existing) {
+      if (Object.keys(patch).length === 0) {
+        patch.lastSignedIn = new Date();
+      }
+      await updateUser(existing.id, patch);
+    } else {
+      if (!patch.lastSignedIn) {
+        patch.lastSignedIn = new Date();
+      }
+      await createUser({ openId: user.openId, ...patch });
     }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
   } catch (error) {
     console.error("[Database] Failed to upsert user:", error);
     throw error;
   }
 }
 
-export async function getUserByOpenId(openId: string) {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user: database not available");
-    return undefined;
-  }
-
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-
-  return result.length > 0 ? result[0] : undefined;
+export async function getUserByOpenId(openId: string): Promise<User | undefined> {
+  return fsGetUserByOpenId(openId);
 }
 
 // TODO: add feature queries here as your schema grows.

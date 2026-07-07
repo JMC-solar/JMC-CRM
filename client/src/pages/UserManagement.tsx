@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { useState } from "react";
-import { UserPlus, Ban, CheckCircle, Trash2, Key, Users, ClipboardList, Pencil, Eye, EyeOff, Mail, ShieldOff, ShieldCheck, Search } from "lucide-react";
+import { UserPlus, Ban, CheckCircle, Trash2, Key, Users, ClipboardList, Pencil, Mail, ShieldOff, ShieldCheck, Search } from "lucide-react";
 import { confirm } from "@/lib/confirm";
 
 export default function UserManagement() {
@@ -27,11 +27,6 @@ export default function UserManagement() {
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [newPassword, setNewPassword] = useState("");
   const [editForm, setEditForm] = useState({ username: "", email: "", mobile: "", name: "" });
-  const [visiblePasswords, setVisiblePasswords] = useState<Record<number, boolean>>({});
-
-  const togglePasswordVisibility = (userId: number) => {
-    setVisiblePasswords(prev => ({ ...prev, [userId]: !prev[userId] }));
-  };
 
   // Create user form state
   const [createForm, setCreateForm] = useState({
@@ -215,7 +210,6 @@ export default function UserManagement() {
                       <tr className="border-b border-border">
                         <th className="text-left p-4 text-sm font-medium text-muted-foreground">Name</th>
                         <th className="text-left p-4 text-sm font-medium text-muted-foreground">Username</th>
-                        {isAdmin && <th className="text-left p-4 text-sm font-medium text-muted-foreground">Password</th>}
                         <th className="text-left p-4 text-sm font-medium text-muted-foreground">Email</th>
                         <th className="text-left p-4 text-sm font-medium text-muted-foreground">Mobile</th>
                         <th className="text-left p-4 text-sm font-medium text-muted-foreground">Role</th>
@@ -235,23 +229,6 @@ export default function UserManagement() {
                           <tr key={u.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                             <td className="p-4 font-medium text-foreground">{u.name || "—"}</td>
                             <td className="p-4 text-sm text-muted-foreground">{u.username || "—"}</td>
-                            {isAdmin && (
-                              <td className="p-4 text-sm text-muted-foreground">
-                                <div className="flex items-center gap-1">
-                                  <span className="font-mono text-xs">
-                                    {visiblePasswords[u.id] ? (u.passwordPlain || "—") : "••••••••"}
-                                  </span>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-6 w-6"
-                                    onClick={() => togglePasswordVisibility(u.id)}
-                                  >
-                                    {visiblePasswords[u.id] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                                  </Button>
-                                </div>
-                              </td>
-                            )}
                             <td className="p-4 text-sm text-muted-foreground">{u.email || "—"}</td>
                             <td className="p-4 text-sm text-muted-foreground">{u.mobile || "—"}</td>
                             <td className="p-4">{getRoleBadge(u.role)}</td>

@@ -1,19 +1,100 @@
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
 import { getDb } from "./db";
-import { z } from "zod";
-import { eq, like, and, or, sql, desc, count, sum, inArray } from "drizzle-orm";
 import {
-  users, leads, contacts, accounts, opportunities, activities,
-  inventoryItems, stockTransactions, purchaseOrders, purchaseOrderItems, poPayments, bomPackages, bomPackageItems,
-  quotations, quotationItems, auditLogs, suppliers, configOptions,
-  projects, projectStatusHistory, netMetering, stockAdjustments, inventoryAuditLog, supplierItemPrices, projectPayments,
-  netMeteringPayments, deliveryReceipts, acknowledgementReceipts,
-  specialQuotationTemplates, specialQuotations, itemPriceHistory
+  getUserById, getUserByUsername, listUsersRaw, createUser, updateUser, deleteUser,
+} from "./firestore-users";
+import {
+  audit as fsAudit,
+  listAll as fsListAll,
+  listPaginated as fsListPaginated,
+  getById as fsGetById,
+  insertOne as fsInsertOne,
+  updateOne as fsUpdateOne,
+  deleteOne as fsDeleteOne,
+  insertMany as fsInsertMany,
+  allocateIds as fsAllocateIds,
+  docToData as fsDocToData,
+  fdb,
+  type PaginatedResult,
+} from "./firestore";
+import type { WhereFilterOp } from "firebase-admin/firestore";
+import type {
+  AuditLog as FsAuditLog,
+  Account,
+  Contact,
+  Opportunity,
+  Activity,
+  Supplier,
+  ConfigOption,
+  SupplierItemPrice,
+  InventoryItem,
+  StockTransaction,
+  BomPackage,
+  BomPackageItem,
+  StockAdjustment,
+  InventoryAuditLog,
+  ItemPriceHistory,
+  PurchaseOrder,
+  PurchaseOrderItem,
+  PoPayment,
+  Quotation,
+  QuotationItem,
+  DeliveryReceipt,
+  AcknowledgementReceipt,
+  Project,
+  ProjectStatusHistory,
+  ProjectPayment,
+  NetMetering,
+  NetMeteringPayment,
+  SpecialQuotationTemplate,
+  SpecialQuotation,
+} from "./models";
+import { money } from "./models";
+import { z } from "zod";
+import { eq, and, sql, count } from "drizzle-orm";
+import {
+  leads, contacts, accounts, opportunities,
+  inventoryItems, quotations, projectPayments,
 } from "../drizzle/schema";
-import { gte, lte } from "drizzle-orm";
+
+/** Recomputes a BOM package's totalCost from its line items' quantity * inventory sellingPrice. */
+async function recalcBomTotalCost(packageId: number): Promise<void> {
+  const [bomItems, items] = await Promise.all([
+    fsListAll<BomPackageItem>("bom_package_items", { where: [["packageId", "==", packageId]] }),
+    fsListAll<InventoryItem>("inventory_items"),
+  ]);
+  const itemMap = new Map(items.map(i => [i.id, i]));
+  const totalCost = bomItems.reduce((sum, bi) => sum + bi.quantity * Number(itemMap.get(bi.itemId)?.sellingPrice || 0), 0);
+  await fsUpdateOne("bom_packages", packageId, { totalCost: money(totalCost) });
+}
+
+/** Recomputes a quotation's subtotal/discountAmount/taxAmount/totalAmount from its line items + header discount/VAT/labor/installation fields. */
+async function recalcQuotationTotals(quotationId: number): Promise<void> {
+  const [items, quote] = await Promise.all([
+    fsListAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quotationId]] }),
+    fsGetById<Quotation>("quotations", quotationId),
+  ]);
+  const subtotal = items.reduce((sum, i) => sum + Number(i.totalPrice), 0);
+  const discountPct = Number(quote?.discountPercent || 0);
+  const manualDiscount = Number(quote?.discountManualAmount || 0);
+  const taxPct = quote?.vatEnabled ? Number(quote?.taxPercent || 0) : 0;
+  const labor = Number(quote?.laborCost || 0);
+  const installation = Number(quote?.installationFee || 0);
+  const percentageDiscountAmt = subtotal * (discountPct / 100);
+  const totalDiscountAmt = percentageDiscountAmt + manualDiscount;
+  const afterDiscount = subtotal - totalDiscountAmt;
+  const taxAmt = afterDiscount * (taxPct / 100);
+  const total = afterDiscount + taxAmt + labor + installation;
+  await fsUpdateOne("quotations", quotationId, {
+    subtotal: money(subtotal),
+    discountAmount: money(totalDiscountAmt),
+    taxAmount: money(taxAmt),
+    totalAmount: money(total),
+  });
+}
 
 export const appRouter = router({
   system: systemRouter,
@@ -21,9 +102,9 @@ export const appRouter = router({
     me: publicProcedure.query(opts => {
       const u = opts.ctx.user;
       if (!u) return null;
-      // Never leak credentials/secrets to the client. Admin password viewing
+      // Never leak credentials/secrets to the client. Admin password reset
       // is handled separately in the users router (admin-only).
-      const { passwordHash, passwordPlain, totpSecret, resetToken, resetTokenExpiry, ...safe } = u;
+      const { passwordHash, totpSecret, resetToken, resetTokenExpiry, ...safe } = u;
       return safe;
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
@@ -109,27 +190,38 @@ export const appRouter = router({
   // ============ LEADS ============
   leads: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional(), status: z.string().optional(), page: z.number().default(1), limit: z.number().default(20) })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0, page: input.page, limit: input.limit, totalPages: 0 };
-      const conditions = [];
-      if (input.search) conditions.push(or(like(leads.firstName, `%${input.search}%`), like(leads.lastName, `%${input.search}%`), like(leads.company, `%${input.search}%`), like(leads.email, `%${input.search}%`), like(leads.phone, `%${input.search}%`), like(leads.source, `%${input.search}%`), like(leads.systemSize, `%${input.search}%`), like(leads.notes, `%${input.search}%`)));
-      if (input.status) conditions.push(eq(leads.status, input.status as any));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const [totalResult] = await db.select({ c: count() }).from(leads).where(where);
-      const total = totalResult.c || 0;
-      const offset = (input.page - 1) * input.limit;
-      const items = await db.select().from(leads).where(where).orderBy(desc(leads.createdAt)).limit(input.limit).offset(offset);
-      return { items, total, page: input.page, limit: input.limit, totalPages: Math.ceil(total / input.limit) };
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.status) filters.push(["status", "==", input.status]);
+      return fsListPaginated("leads", {
+        search: input.search,
+        searchFields: ["firstName", "lastName", "company", "email", "phone", "source", "systemSize", "notes"],
+        filters,
+        page: input.page,
+        limit: input.limit,
+      });
     }),
     create: protectedProcedure.input(z.object({
       firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
       phone: z.string().optional(), company: z.string().optional(), source: z.string().optional(),
       status: z.string().optional(), systemSize: z.string().optional(), estimatedValue: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(leads).values({ ...input, status: (input.status as any) || "new", createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "lead", details: `Created lead: ${input.firstName}` });
+      await fsInsertOne("leads", {
+        firstName: input.firstName,
+        lastName: input.lastName ?? null,
+        email: input.email ?? null,
+        phone: input.phone ?? null,
+        company: input.company ?? null,
+        source: input.source ?? null,
+        status: input.status || "new",
+        systemSize: input.systemSize ?? null,
+        estimatedValue: input.estimatedValue ?? null,
+        notes: input.notes ?? null,
+        contactId: null,
+        accountId: null,
+        assignedTo: null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "lead", undefined, `Created lead: ${input.firstName}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
@@ -137,18 +229,14 @@ export const appRouter = router({
       phone: z.string().optional(), company: z.string().optional(), source: z.string().optional(),
       status: z.string().optional(), systemSize: z.string().optional(), estimatedValue: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(leads).set({ ...data, status: (data.status as any) || "new" }).where(eq(leads.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "lead", entityId: id, details: `Updated lead: ${input.firstName}` });
+      await fsUpdateOne("leads", id, { ...data, status: data.status || "new" });
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "lead", id, `Updated lead: ${input.firstName}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(leads).where(eq(leads.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "lead", entityId: input.id, details: `Deleted lead #${input.id}` });
+      await fsDeleteOne("leads", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "lead", input.id, `Deleted lead #${input.id}`);
       return { success: true };
     }),
   }),
@@ -156,26 +244,31 @@ export const appRouter = router({
   // ============ CONTACTS ============
   contacts: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional(), page: z.number().default(1), limit: z.number().default(20) })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0, page: input.page, limit: input.limit, totalPages: 0 };
-      const conditions = [];
-      if (input.search) conditions.push(or(like(contacts.firstName, `%${input.search}%`), like(contacts.lastName, `%${input.search}%`), like(contacts.email, `%${input.search}%`), like(contacts.company, `%${input.search}%`), like(contacts.phone, `%${input.search}%`), like(contacts.position, `%${input.search}%`), like(contacts.city, `%${input.search}%`), like(contacts.address, `%${input.search}%`)));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const [totalResult] = await db.select({ c: count() }).from(contacts).where(where);
-      const total = totalResult.c || 0;
-      const offset = (input.page - 1) * input.limit;
-      const items = await db.select().from(contacts).where(where).orderBy(desc(contacts.createdAt)).limit(input.limit).offset(offset);
-      return { items, total, page: input.page, limit: input.limit, totalPages: Math.ceil(total / input.limit) };
+      return fsListPaginated("contacts", {
+        search: input.search,
+        searchFields: ["firstName", "lastName", "email", "company", "phone", "position", "city", "address"],
+        page: input.page,
+        limit: input.limit,
+      });
     }),
     create: protectedProcedure.input(z.object({
       firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
       phone: z.string().optional(), company: z.string().optional(), position: z.string().optional(),
       city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(contacts).values({ ...input, createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "contact", details: `Created contact: ${input.firstName}` });
+      await fsInsertOne("contacts", {
+        firstName: input.firstName,
+        lastName: input.lastName ?? null,
+        email: input.email ?? null,
+        phone: input.phone ?? null,
+        company: input.company ?? null,
+        position: input.position ?? null,
+        address: null,
+        city: input.city ?? null,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "contact", undefined, `Created contact: ${input.firstName}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
@@ -183,17 +276,13 @@ export const appRouter = router({
       phone: z.string().optional(), company: z.string().optional(), position: z.string().optional(),
       city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(contacts).set(data).where(eq(contacts.id, id));
+      await fsUpdateOne("contacts", id, data);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(contacts).where(eq(contacts.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "contact", entityId: input.id, details: `Deleted contact #${input.id}` });
+      await fsDeleteOne("contacts", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "contact", input.id, `Deleted contact #${input.id}`);
       return { success: true };
     }),
   }),
@@ -201,43 +290,50 @@ export const appRouter = router({
   // ============ ACCOUNTS ============
   accounts: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(like(accounts.name, `%${input.search}%`), like(accounts.email, `%${input.search}%`), like(accounts.industry, `%${input.search}%`), like(accounts.phone, `%${input.search}%`), like(accounts.city, `%${input.search}%`), like(accounts.website, `%${input.search}%`)));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(accounts).where(where).orderBy(desc(accounts.createdAt)).limit(200);
+      const result = (await fsListPaginated("accounts", {
+        search: input.search,
+        searchFields: ["name", "email", "industry", "phone", "city", "website"],
+        page: 1,
+        limit: 200,
+      })) as unknown as PaginatedResult<Account>;
+      return result.items;
     }),
     listAll: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select({ id: accounts.id, name: accounts.name }).from(accounts).orderBy(accounts.name);
+      const all = await fsListAll<Account>("accounts");
+      return all
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(a => ({ id: a.id, name: a.name }));
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
       email: z.string().optional(), website: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(accounts).values({ ...input, createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "account", details: `Created account: ${input.name}` });
+      await fsInsertOne("accounts", {
+        name: input.name,
+        industry: input.industry ?? null,
+        phone: input.phone ?? null,
+        email: input.email ?? null,
+        website: input.website ?? null,
+        address: null,
+        city: input.city ?? null,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "account", undefined, `Created account: ${input.name}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(), name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
       email: z.string().optional(), website: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(accounts).set(data).where(eq(accounts.id, id));
+      await fsUpdateOne("accounts", id, data);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(accounts).where(eq(accounts.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "account", entityId: input.id, details: `Deleted account #${input.id}` });
+      await fsDeleteOne("accounts", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "account", input.id, `Deleted account #${input.id}`);
       return { success: true };
     }),
   }),
@@ -245,45 +341,57 @@ export const appRouter = router({
   // ============ OPPORTUNITIES ============
   opportunities: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional(), status: z.string().optional() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(like(opportunities.title, `%${input.search}%`), like(opportunities.systemSize, `%${input.search}%`), like(opportunities.systemType, `%${input.search}%`), like(opportunities.notes, `%${input.search}%`)));
-      if (input.status) conditions.push(eq(opportunities.status, input.status as any));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(opportunities).where(where).orderBy(desc(opportunities.createdAt)).limit(200);
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.status) filters.push(["status", "==", input.status]);
+      const result = (await fsListPaginated("opportunities", {
+        search: input.search,
+        searchFields: ["title", "systemSize", "systemType", "notes"],
+        filters,
+        page: 1,
+        limit: 200,
+      })) as unknown as PaginatedResult<Opportunity>;
+      return result.items;
     }),
     listAll: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select({ id: opportunities.id, title: opportunities.title, status: opportunities.status }).from(opportunities).orderBy(desc(opportunities.createdAt)).limit(100);
+      const result = (await fsListPaginated("opportunities", {
+        page: 1,
+        limit: 100,
+      })) as unknown as PaginatedResult<Opportunity>;
+      return result.items.map(o => ({ id: o.id, title: o.title, status: o.status }));
     }),
     create: protectedProcedure.input(z.object({
       title: z.string().min(1), status: z.string().optional(), value: z.string().optional(),
       systemSize: z.string().optional(), systemType: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(opportunities).values({ ...input, status: (input.status as any) || "new", createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "opportunity", details: `Created opportunity: ${input.title}` });
+      await fsInsertOne("opportunities", {
+        title: input.title,
+        status: input.status || "new",
+        value: input.value ?? null,
+        systemSize: input.systemSize ?? null,
+        systemType: input.systemType ?? null,
+        contactId: null,
+        accountId: null,
+        leadId: null,
+        assignedTo: null,
+        expectedCloseDate: null,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "opportunity", undefined, `Created opportunity: ${input.title}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(), title: z.string().min(1), status: z.string().optional(), value: z.string().optional(),
       systemSize: z.string().optional(), systemType: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(opportunities).set({ ...data, status: (data.status as any) || "new" }).where(eq(opportunities.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "opportunity", entityId: id, details: `Updated opportunity: ${input.title}` });
+      await fsUpdateOne("opportunities", id, { ...data, status: data.status || "new" });
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "opportunity", id, `Updated opportunity: ${input.title}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(opportunities).where(eq(opportunities.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "opportunity", entityId: input.id, details: `Deleted opportunity #${input.id}` });
+      await fsDeleteOne("opportunities", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "opportunity", input.id, `Deleted opportunity #${input.id}`);
       return { success: true };
     }),
   }),
@@ -291,28 +399,46 @@ export const appRouter = router({
   // ============ ACTIVITIES ============
   activities: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(like(activities.subject, `%${input.search}%`), like(activities.description, `%${input.search}%`), sql`DATE_FORMAT(${activities.scheduledAt}, '%Y-%m-%d') LIKE ${`%${input.search}%`}`));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(activities).where(where).orderBy(desc(activities.createdAt)).limit(200);
+      const all = await fsListAll<Activity>("activities");
+      const search = input.search?.trim().toLowerCase();
+      let items = all;
+      if (search) {
+        items = all.filter(a => {
+          if (a.subject && a.subject.toLowerCase().includes(search)) return true;
+          if (a.description && a.description.toLowerCase().includes(search)) return true;
+          if (a.scheduledAt) {
+            const dateStr = a.scheduledAt.toISOString().slice(0, 10);
+            if (dateStr.includes(search)) return true;
+          }
+          return false;
+        });
+      }
+      return items
+        .slice()
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 200);
     }),
     create: protectedProcedure.input(z.object({
       type: z.string(), subject: z.string().min(1), description: z.string().optional(),
       contactId: z.number().optional(), opportunityId: z.number().optional(), leadId: z.number().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(activities).values({ ...input, type: input.type as any, createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "activity", details: `Logged ${input.type}: ${input.subject}` });
+      await fsInsertOne("activities", {
+        type: input.type,
+        subject: input.subject,
+        description: input.description ?? null,
+        contactId: input.contactId ?? null,
+        opportunityId: input.opportunityId ?? null,
+        leadId: input.leadId ?? null,
+        scheduledAt: null,
+        completedAt: null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "activity", undefined, `Logged ${input.type}: ${input.subject}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(activities).where(eq(activities.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "activity", entityId: input.id, details: `Deleted activity #${input.id}` });
+      await fsDeleteOne("activities", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "activity", input.id, `Deleted activity #${input.id}`);
       return { success: true };
     }),
   }),
@@ -320,20 +446,27 @@ export const appRouter = router({
   // ============ CONFIG OPTIONS ============
   config: router({
     getOptions: protectedProcedure.input(z.object({ category: z.string() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(configOptions).where(and(eq(configOptions.category, input.category), eq(configOptions.isActive, 1))).orderBy(configOptions.sortOrder);
+      const options = await fsListAll<ConfigOption>("config_options", {
+        where: [
+          ["category", "==", input.category],
+          ["isActive", "==", 1],
+        ],
+      });
+      return options
+        .slice()
+        .sort((a, b) => (a.sortOrder ?? -Infinity) - (b.sortOrder ?? -Infinity));
     }),
     addOption: adminProcedure.input(z.object({ category: z.string(), value: z.string().min(1) })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(configOptions).values({ category: input.category, value: input.value });
+      await fsInsertOne("config_options", {
+        category: input.category,
+        value: input.value,
+        sortOrder: 0,
+        isActive: 1,
+      });
       return { success: true };
     }),
     removeOption: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.update(configOptions).set({ isActive: 0 }).where(eq(configOptions.id, input.id));
+      await fsUpdateOne("config_options", input.id, { isActive: 0 });
       return { success: true };
     }),
   }),
@@ -341,27 +474,41 @@ export const appRouter = router({
   // ============ SUPPLIERS ============
   suppliers: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(like(suppliers.name, `%${input.search}%`), like(suppliers.code, `%${input.search}%`), like(suppliers.contactPerson, `%${input.search}%`), like(suppliers.phone, `%${input.search}%`), like(suppliers.email, `%${input.search}%`), like(suppliers.address, `%${input.search}%`), like(suppliers.city, `%${input.search}%`), like(suppliers.notes, `%${input.search}%`)));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(suppliers).where(where).orderBy(desc(suppliers.createdAt)).limit(200);
+      const result = (await fsListPaginated("suppliers", {
+        search: input.search,
+        searchFields: ["name", "code", "contactPerson", "phone", "email", "address", "city", "notes"],
+        page: 1,
+        limit: 200,
+      })) as unknown as PaginatedResult<Supplier>;
+      return result.items;
     }),
     listAll: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select({ id: suppliers.id, name: suppliers.name, code: suppliers.code }).from(suppliers).orderBy(suppliers.name).limit(500);
+      const result = (await fsListPaginated("suppliers", {
+        page: 1,
+        limit: 500,
+        orderBy: "name",
+        dir: "asc",
+      })) as unknown as PaginatedResult<Supplier>;
+      return result.items.map(s => ({ id: s.id, name: s.name, code: s.code }));
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1), code: z.string().optional(), contactPerson: z.string().optional(),
       phone: z.string().optional(), email: z.string().optional(), address: z.string().optional(),
       city: z.string().optional(), paymentTerms: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(suppliers).values({ ...input, createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "supplier", details: `Created supplier: ${input.name}` });
+      await fsInsertOne("suppliers", {
+        name: input.name,
+        code: input.code ?? null,
+        contactPerson: input.contactPerson ?? null,
+        phone: input.phone ?? null,
+        email: input.email ?? null,
+        address: input.address ?? null,
+        city: input.city ?? null,
+        paymentTerms: input.paymentTerms ?? null,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "supplier", undefined, `Created supplier: ${input.name}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
@@ -369,53 +516,57 @@ export const appRouter = router({
       phone: z.string().optional(), email: z.string().optional(), address: z.string().optional(),
       city: z.string().optional(), paymentTerms: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(suppliers).set(data).where(eq(suppliers.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "supplier", entityId: id, details: `Updated supplier: ${input.name}` });
+      await fsUpdateOne("suppliers", id, data);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "supplier", id, `Updated supplier: ${input.name}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(suppliers).where(eq(suppliers.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "supplier", entityId: input.id, details: `Deleted supplier #${input.id}` });
+      await fsDeleteOne("suppliers", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "supplier", input.id, `Deleted supplier #${input.id}`);
       return { success: true };
     }),
     // Get all item prices for a specific supplier
     getItemPrices: protectedProcedure.input(z.object({ supplierId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const prices = await db.select().from(supplierItemPrices).where(eq(supplierItemPrices.supplierId, input.supplierId)).orderBy(desc(supplierItemPrices.updatedAt));
-      // Enrich with item names
+      const prices = await fsListAll<SupplierItemPrice>("supplier_item_prices", {
+        where: [["supplierId", "==", input.supplierId]],
+      });
       if (prices.length === 0) return [];
-      const itemIds = prices.map(p => p.inventoryItemId);
-      const items = await db.select({ id: inventoryItems.id, name: inventoryItems.name, sku: inventoryItems.sku, purchasePrice: inventoryItems.purchasePrice, unit: inventoryItems.unit }).from(inventoryItems).where(or(...itemIds.map(id => eq(inventoryItems.id, id))));
-      const itemMap = new Map(items.map(i => [i.id, i]));
-      return prices.map(p => ({ ...p, item: itemMap.get(p.inventoryItemId) || null }));
+      prices.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+      const itemIds = Array.from(new Set(prices.map(p => p.inventoryItemId)));
+      const fetchedItems = await Promise.all(itemIds.map(id => fsGetById<InventoryItem>("inventory_items", id)));
+      const itemMap = new Map<number, InventoryItem>();
+      fetchedItems.forEach((it, idx) => { if (it) itemMap.set(itemIds[idx], it); });
+      return prices.map(p => {
+        const it = itemMap.get(p.inventoryItemId);
+        return {
+          ...p,
+          item: it ? { id: it.id, name: it.name, sku: it.sku, purchasePrice: it.purchasePrice, unit: it.unit } : null,
+        };
+      });
     }),
   }),
 
   // ============ INVENTORY ============
   inventory: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional(), category: z.string().optional(), page: z.number().default(1), limit: z.number().default(20) })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0, page: input.page, limit: input.limit, totalPages: 0 };
-      const conditions = [];
-      if (input.search) conditions.push(or(like(inventoryItems.name, `%${input.search}%`), like(inventoryItems.sku, `%${input.search}%`), like(inventoryItems.brand, `%${input.search}%`), like(inventoryItems.model, `%${input.search}%`), like(inventoryItems.description, `%${input.search}%`), like(inventoryItems.warehouseLocation, `%${input.search}%`)));
-      if (input.category) conditions.push(eq(inventoryItems.category, input.category as any));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const [totalResult] = await db.select({ c: count() }).from(inventoryItems).where(where);
-      const total = totalResult.c || 0;
-      const offset = (input.page - 1) * input.limit;
-      const items = await db.select().from(inventoryItems).where(where).orderBy(desc(inventoryItems.createdAt)).limit(input.limit).offset(offset);
-      return { items, total, page: input.page, limit: input.limit, totalPages: Math.ceil(total / input.limit) };
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.category) filters.push(["category", "==", input.category]);
+      return fsListPaginated("inventory_items", {
+        search: input.search,
+        searchFields: ["name", "sku", "brand", "model", "description", "warehouseLocation"],
+        filters,
+        page: input.page,
+        limit: input.limit,
+      });
     }),
     listAll: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select({ id: inventoryItems.id, name: inventoryItems.name, sku: inventoryItems.sku, category: inventoryItems.category, brand: inventoryItems.brand, model: inventoryItems.model, unit: inventoryItems.unit, purchasePrice: inventoryItems.purchasePrice, sellingPrice: inventoryItems.sellingPrice, stockOnHand: inventoryItems.stockOnHand }).from(inventoryItems).orderBy(inventoryItems.name).limit(500);
+      const items = await fsListAll<InventoryItem>("inventory_items", {
+        select: ["name", "sku", "category", "brand", "model", "unit", "purchasePrice", "sellingPrice", "stockOnHand"],
+      });
+      return items
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+        .slice(0, 500);
     }),
     create: protectedProcedure.input(z.object({
       sku: z.string().min(1), name: z.string().min(1), category: z.string(),
@@ -424,24 +575,41 @@ export const appRouter = router({
       stockOnHand: z.number().optional(), reorderLevel: z.number().optional(),
       unit: z.string().optional(), warehouseLocation: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       // Non-admin users cannot set initial stock directly - must use Stock In transaction
       const initialStock = ctx.user.role === 'admin' ? (input.stockOnHand ?? 0) : 0;
-      await db.insert(inventoryItems).values({ ...input, category: input.category as any, stockOnHand: initialStock, reorderLevel: input.reorderLevel ?? 5, createdBy: ctx.user.id });
+      const now = new Date();
+      const itemId = await fsAllocateIds("inventory_items");
+      const batch = fdb().batch();
+      batch.set(fdb().collection("inventory_items").doc(String(itemId)), {
+        id: itemId,
+        sku: input.sku, name: input.name, category: input.category,
+        description: input.description ?? null,
+        brand: input.brand ?? null, model: input.model ?? null, specs: null,
+        unit: input.unit ?? null,
+        purchasePrice: input.purchasePrice ?? null, sellingPrice: input.sellingPrice ?? null,
+        stockOnHand: initialStock, stockReserved: 0,
+        reorderLevel: input.reorderLevel ?? 5,
+        warehouseLocation: input.warehouseLocation ?? null,
+        createdBy: ctx.user.id,
+        createdAt: now, updatedAt: now,
+      });
       // If admin set initial stock, log it in audit
       if (initialStock > 0) {
-        await db.insert(inventoryAuditLog).values({
-          itemId: 0, // will be updated below
-          itemName: input.name, itemSku: input.sku,
+        const auditId = await fsAllocateIds("inventory_audit_log");
+        batch.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+          id: auditId,
+          itemId, itemName: input.name, itemSku: input.sku,
           transactionType: 'initial', quantity: initialStock,
           previousStock: 0, newStock: initialStock,
+          sourceLocation: null,
           destinationLocation: input.warehouseLocation || null,
-          reference: 'Initial stock set on creation',
+          reference: 'Initial stock set on creation', purpose: null, notes: null,
           performedBy: ctx.user.id, performedByName: ctx.user.name || 'Admin',
+          createdAt: now,
         });
       }
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "inventory", details: `Added item: ${input.name}` });
+      await batch.commit();
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "inventory", itemId, `Added item: ${input.name}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
@@ -452,88 +620,81 @@ export const appRouter = router({
       unit: z.string().optional(), warehouseLocation: z.string().optional(),
       priceChangeNotes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, stockOnHand, priceChangeNotes, ...data } = input;
       // Get current item for audit log and price history
-      const [currentItem] = await db.select({ stockOnHand: inventoryItems.stockOnHand, name: inventoryItems.name, sku: inventoryItems.sku, purchasePrice: inventoryItems.purchasePrice, sellingPrice: inventoryItems.sellingPrice }).from(inventoryItems).where(eq(inventoryItems.id, id));
+      const currentItem = await fsGetById<InventoryItem>("inventory_items", id);
       // Track price changes
       if (currentItem) {
         const oldPurchase = currentItem.purchasePrice || "0";
         const newPurchase = data.purchasePrice || "0";
         if (oldPurchase !== newPurchase) {
-          await db.insert(itemPriceHistory).values({ itemId: id, priceType: "purchase", oldPrice: oldPurchase, newPrice: newPurchase, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: priceChangeNotes || null });
+          await fsInsertOne("item_price_history", { itemId: id, priceType: "purchase", oldPrice: oldPurchase, newPrice: newPurchase, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: priceChangeNotes ?? null });
         }
         const oldSelling = currentItem.sellingPrice || "0";
         const newSelling = data.sellingPrice || "0";
         if (oldSelling !== newSelling) {
-          await db.insert(itemPriceHistory).values({ itemId: id, priceType: "selling", oldPrice: oldSelling, newPrice: newSelling, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: priceChangeNotes || null });
+          await fsInsertOne("item_price_history", { itemId: id, priceType: "selling", oldPrice: oldSelling, newPrice: newSelling, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: priceChangeNotes ?? null });
         }
       }
       const prevStock = currentItem?.stockOnHand ?? 0;
+      const patch = { ...data, category: data.category as any };
       // Non-admin cannot directly edit stockOnHand - enforced at backend
       if (ctx.user.role !== 'admin') {
         // Strip stockOnHand for non-admin - they must use transactions
-        await db.update(inventoryItems).set({ ...data, category: data.category as any }).where(eq(inventoryItems.id, id));
-      } else {
-        // Admin can edit stock directly
-        if (stockOnHand !== undefined && stockOnHand !== prevStock) {
-          await db.update(inventoryItems).set({ ...data, category: data.category as any, stockOnHand }).where(eq(inventoryItems.id, id));
-          // Log the stock adjustment in inventory audit
-          await db.insert(inventoryAuditLog).values({
+        await fsUpdateOne("inventory_items", id, patch);
+      } else if (stockOnHand !== undefined && stockOnHand !== prevStock) {
+        // Admin can edit stock directly - read-modify-write the item + audit row atomically
+        const auditId = await fsAllocateIds("inventory_audit_log");
+        await fdb().runTransaction(async (tx) => {
+          const itemRef = fdb().collection("inventory_items").doc(String(id));
+          const snap = await tx.get(itemRef);
+          const liveStock = snap.exists ? ((snap.data()?.stockOnHand as number) ?? 0) : 0;
+          tx.set(itemRef, { ...patch, stockOnHand, updatedAt: new Date() }, { merge: true });
+          tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+            id: auditId,
             itemId: id, itemName: currentItem?.name || input.name, itemSku: currentItem?.sku || input.sku,
-            transactionType: 'adjustment', quantity: Math.abs(stockOnHand - prevStock),
-            previousStock: prevStock, newStock: stockOnHand,
-            reference: 'Direct edit by admin',
+            transactionType: 'adjustment', quantity: Math.abs(stockOnHand - liveStock),
+            previousStock: liveStock, newStock: stockOnHand,
+            sourceLocation: null, destinationLocation: null,
+            reference: 'Direct edit by admin', purpose: null, notes: null,
             performedBy: ctx.user.id, performedByName: ctx.user.name || 'Admin',
+            createdAt: new Date(),
           });
-        } else {
-          await db.update(inventoryItems).set({ ...data, category: data.category as any, ...(stockOnHand !== undefined ? { stockOnHand } : {}) }).where(eq(inventoryItems.id, id));
-        }
+        });
+      } else {
+        await fsUpdateOne("inventory_items", id, { ...patch, ...(stockOnHand !== undefined ? { stockOnHand } : {}) });
       }
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "inventory", entityId: id, details: `Updated item: ${input.name}` });
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "inventory", id, `Updated item: ${input.name}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== 'admin') throw new Error("Only Admin can delete inventory items");
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(inventoryItems).where(eq(inventoryItems.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "inventory", entityId: input.id, details: `Deleted item #${input.id}` });
+      await fsDeleteOne("inventory_items", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "inventory", input.id, `Deleted item #${input.id}`);
       return { success: true };
     }),
     priceHistory: protectedProcedure.input(z.object({ itemId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(itemPriceHistory).where(eq(itemPriceHistory.itemId, input.itemId)).orderBy(desc(itemPriceHistory.createdAt)).limit(100);
+      const rows = await fsListAll<ItemPriceHistory>("item_price_history", {
+        where: [["itemId", "==", input.itemId]],
+      });
+      return rows
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 100);
     }),
   }),
 
   // ============ STOCK TRANSACTIONS ============
   stockTransactions: router({
     list: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({
-        id: stockTransactions.id,
-        itemId: stockTransactions.itemId,
-        type: stockTransactions.type,
-        quantity: stockTransactions.quantity,
-        reference: stockTransactions.reference,
-        purpose: stockTransactions.purpose,
-        purposeRefId: stockTransactions.purposeRefId,
-        purposeRefName: stockTransactions.purposeRefName,
-        accountId: stockTransactions.accountId,
-        accountName: stockTransactions.accountName,
-        notes: stockTransactions.notes,
-        createdBy: stockTransactions.createdBy,
-        createdByName: stockTransactions.createdByName,
-        createdAt: stockTransactions.createdAt,
-        itemName: inventoryItems.name,
-      }).from(stockTransactions)
-        .leftJoin(inventoryItems, eq(stockTransactions.itemId, inventoryItems.id))
-        .orderBy(desc(stockTransactions.createdAt)).limit(200);
-      return result;
+      const [transactions, items] = await Promise.all([
+        fsListAll<StockTransaction>("stock_transactions"),
+        fsListAll<InventoryItem>("inventory_items"),
+      ]);
+      const itemMap = new Map(items.map(i => [i.id, i]));
+      return transactions
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 200)
+        .map(t => ({ ...t, itemName: itemMap.get(t.itemId)?.name ?? null }));
     }),
     create: protectedProcedure.input(z.object({
       itemId: z.number(), type: z.string(), quantity: z.number().min(1),
@@ -542,38 +703,60 @@ export const appRouter = router({
       accountId: z.number().optional(), accountName: z.string().optional(),
       sourceLocation: z.string().optional(), destinationLocation: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       // Only admin can do adjustments directly
       if (input.type === 'adjustment' && ctx.user.role !== 'admin') {
         throw new Error("Only admin can perform stock adjustments");
       }
-      // Get current stock for audit log
-      const [item] = await db.select({ stockOnHand: inventoryItems.stockOnHand, name: inventoryItems.name, sku: inventoryItems.sku, warehouseLocation: inventoryItems.warehouseLocation }).from(inventoryItems).where(eq(inventoryItems.id, input.itemId));
-      const prevStock = item?.stockOnHand ?? 0;
-      let newStock = prevStock;
 
-      await db.insert(stockTransactions).values({ ...input, type: input.type as any, createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown' });
-      if (input.type === "stock_in") {
-        await db.update(inventoryItems).set({ stockOnHand: sql`stockOnHand + ${input.quantity}` }).where(eq(inventoryItems.id, input.itemId));
-        newStock = prevStock + input.quantity;
-      } else if (input.type === "stock_out") {
-        await db.update(inventoryItems).set({ stockOnHand: sql`stockOnHand - ${input.quantity}` }).where(eq(inventoryItems.id, input.itemId));
-        newStock = prevStock - input.quantity;
-      }
-      // Write to inventory audit log
-      const auditPurpose = input.purpose ? (input.accountName ? `${input.purpose} [Account: ${input.accountName}]` : input.purpose) : (input.accountName ? `Account: ${input.accountName}` : null);
-      await db.insert(inventoryAuditLog).values({
-        itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
-        transactionType: input.type as any, quantity: input.quantity,
-        previousStock: prevStock, newStock,
-        sourceLocation: input.sourceLocation || item?.warehouseLocation || null,
-        destinationLocation: input.destinationLocation || null,
-        reference: input.reference || null, purpose: auditPurpose,
-        notes: input.notes || null,
-        performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown',
+      const txnId = await fsAllocateIds("stock_transactions");
+      const auditId = await fsAllocateIds("inventory_audit_log");
+      const now = new Date();
+
+      // Read-modify-write the item's stock (for stock_in/stock_out) atomically
+      // alongside the stock_transactions row and the inventory_audit_log row.
+      await fdb().runTransaction(async (tx) => {
+        const itemRef = fdb().collection("inventory_items").doc(String(input.itemId));
+        const snap = await tx.get(itemRef);
+        const item = snap.exists ? (snap.data() as InventoryItem | undefined) : undefined;
+        const prevStock = item?.stockOnHand ?? 0;
+        let newStock = prevStock;
+
+        tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+          id: txnId,
+          itemId: input.itemId, type: input.type, quantity: input.quantity,
+          reference: input.reference ?? null, purpose: input.purpose ?? null,
+          purposeRefId: input.purposeRefId ?? null, purposeRefName: input.purposeRefName ?? null,
+          accountId: input.accountId ?? null, accountName: input.accountName ?? null,
+          notes: input.notes ?? null,
+          createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown',
+          createdAt: now,
+        });
+
+        if (input.type === "stock_in") {
+          newStock = prevStock + input.quantity;
+          tx.set(itemRef, { stockOnHand: newStock, updatedAt: now }, { merge: true });
+        } else if (input.type === "stock_out") {
+          newStock = prevStock - input.quantity;
+          tx.set(itemRef, { stockOnHand: newStock, updatedAt: now }, { merge: true });
+        }
+
+        // Write to inventory audit log
+        const auditPurpose = input.purpose ? (input.accountName ? `${input.purpose} [Account: ${input.accountName}]` : input.purpose) : (input.accountName ? `Account: ${input.accountName}` : null);
+        tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+          id: auditId,
+          itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
+          transactionType: input.type, quantity: input.quantity,
+          previousStock: prevStock, newStock,
+          sourceLocation: input.sourceLocation || item?.warehouseLocation || null,
+          destinationLocation: input.destinationLocation || null,
+          reference: input.reference || null, purpose: auditPurpose,
+          notes: input.notes || null,
+          performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown',
+          createdAt: now,
+        });
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "stock_transaction", details: `${input.type} x${input.quantity} for item #${input.itemId}${input.purpose ? ` (${input.purpose})` : ''}` });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "stock_transaction", input.itemId, `${input.type} x${input.quantity} for item #${input.itemId}${input.purpose ? ` (${input.purpose})` : ''}`);
       return { success: true };
     }),
     // Warehouse Transfer: stock-out from source + stock-in to destination
@@ -582,44 +765,53 @@ export const appRouter = router({
       sourceLocation: z.string().min(1), destinationLocation: z.string().min(1),
       reference: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [item] = await db.select({ stockOnHand: inventoryItems.stockOnHand, name: inventoryItems.name, sku: inventoryItems.sku }).from(inventoryItems).where(eq(inventoryItems.id, input.itemId));
+      const item = await fsGetById<InventoryItem>("inventory_items", input.itemId);
       const prevStock = item?.stockOnHand ?? 0;
       if (input.quantity > prevStock) throw new Error("Insufficient stock for transfer");
-      // Create transfer-out transaction
-      await db.insert(stockTransactions).values({
-        itemId: input.itemId, type: 'stock_out', quantity: input.quantity,
-        reference: input.reference || `Transfer: ${input.sourceLocation} → ${input.destinationLocation}`,
-        purpose: 'Warehouse Transfer', notes: input.notes || null, createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown',
-      });
-      // Create transfer-in transaction
-      await db.insert(stockTransactions).values({
-        itemId: input.itemId, type: 'stock_in', quantity: input.quantity,
-        reference: input.reference || `Transfer: ${input.sourceLocation} → ${input.destinationLocation}`,
-        purpose: 'Warehouse Transfer', notes: input.notes || null, createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown',
-      });
+
+      const now = new Date();
+      const reference = input.reference || `Transfer: ${input.sourceLocation} → ${input.destinationLocation}`;
+
+      // Net stock effect is zero (stock-out + stock-in), so no item read-modify-write is needed here.
+      await fsInsertMany("stock_transactions", [
+        {
+          itemId: input.itemId, type: 'stock_out', quantity: input.quantity,
+          reference, purpose: 'Warehouse Transfer', notes: input.notes ?? null,
+          purposeRefId: null, purposeRefName: null, accountId: null, accountName: null,
+          createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown', createdAt: now,
+        },
+        {
+          itemId: input.itemId, type: 'stock_in', quantity: input.quantity,
+          reference, purpose: 'Warehouse Transfer', notes: input.notes ?? null,
+          purposeRefId: null, purposeRefName: null, accountId: null, accountName: null,
+          createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown', createdAt: now,
+        },
+      ]);
+
       // Stock stays the same (out + in), but update location if needed
       // Log transfer_out and transfer_in in audit
-      await db.insert(inventoryAuditLog).values({
-        itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
-        transactionType: 'transfer_out', quantity: input.quantity,
-        previousStock: prevStock, newStock: prevStock,
-        sourceLocation: input.sourceLocation, destinationLocation: input.destinationLocation,
-        reference: input.reference || null, purpose: 'Warehouse Transfer',
-        notes: input.notes || null,
-        performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown',
-      });
-      await db.insert(inventoryAuditLog).values({
-        itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
-        transactionType: 'transfer_in', quantity: input.quantity,
-        previousStock: prevStock, newStock: prevStock,
-        sourceLocation: input.sourceLocation, destinationLocation: input.destinationLocation,
-        reference: input.reference || null, purpose: 'Warehouse Transfer',
-        notes: input.notes || null,
-        performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown',
-      });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "stock_transfer", details: `Transfer x${input.quantity} of item #${input.itemId} from ${input.sourceLocation} to ${input.destinationLocation}` });
+      await fsInsertMany("inventory_audit_log", [
+        {
+          itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
+          transactionType: 'transfer_out', quantity: input.quantity,
+          previousStock: prevStock, newStock: prevStock,
+          sourceLocation: input.sourceLocation, destinationLocation: input.destinationLocation,
+          reference, purpose: 'Warehouse Transfer',
+          notes: input.notes ?? null,
+          performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown', createdAt: now,
+        },
+        {
+          itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
+          transactionType: 'transfer_in', quantity: input.quantity,
+          previousStock: prevStock, newStock: prevStock,
+          sourceLocation: input.sourceLocation, destinationLocation: input.destinationLocation,
+          reference, purpose: 'Warehouse Transfer',
+          notes: input.notes ?? null,
+          performedBy: ctx.user.id, performedByName: ctx.user.name || 'Unknown', createdAt: now,
+        },
+      ]);
+
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "stock_transfer", input.itemId, `Transfer x${input.quantity} of item #${input.itemId} from ${input.sourceLocation} to ${input.destinationLocation}`);
       return { success: true };
     }),
   }),
@@ -636,43 +828,53 @@ export const appRouter = router({
       page: z.number().min(1).default(1),
       limit: z.number().min(1).max(100).default(20),
     }).optional()).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0, page: 1, limit: 20, totalPages: 0 };
       const { search, supplierId, deliveryStatus, paymentStatus, dateFrom, dateTo, page = 1, limit = 20 } = input || {};
-      const conditions: any[] = [];
+      const [allPos, poItems] = await Promise.all([
+        fsListAll<PurchaseOrder>("purchase_orders"),
+        search ? fsListAll<PurchaseOrderItem>("purchase_order_items") : Promise.resolve([] as PurchaseOrderItem[]),
+      ]);
+      let items = allPos;
+      if (supplierId) items = items.filter(p => p.supplierId === supplierId);
+      if (deliveryStatus) items = items.filter(p => p.deliveryStatus === deliveryStatus);
+      if (paymentStatus) items = items.filter(p => p.paymentStatus === paymentStatus);
+      if (dateFrom) { const from = new Date(dateFrom).getTime(); items = items.filter(p => p.createdAt.getTime() >= from); }
+      if (dateTo) { const to = new Date(dateTo).getTime(); items = items.filter(p => p.createdAt.getTime() <= to); }
       if (search) {
-        // Search across PO number, supplier name, notes, and dates (formatted as string)
-        const searchConditions = or(
-          like(purchaseOrders.poNumber, `%${search}%`),
-          like(purchaseOrders.supplier, `%${search}%`),
-          like(purchaseOrders.notes, `%${search}%`),
-          sql`DATE_FORMAT(${purchaseOrders.createdAt}, '%Y-%m-%d') LIKE ${`%${search}%`}`,
-          sql`DATE_FORMAT(${purchaseOrders.createdAt}, '%m/%Y') LIKE ${`%${search}%`}`,
-          sql`DATE_FORMAT(${purchaseOrders.createdAt}, '%Y') LIKE ${`%${search}%`}`,
-          sql`${purchaseOrders.id} IN (SELECT purchaseOrderId FROM purchase_order_items WHERE itemName LIKE ${`%${search}%`} OR description LIKE ${`%${search}%`} OR itemSku LIKE ${`%${search}%`})`
+        const s = search.trim().toLowerCase();
+        const poIdsWithMatchingItems = new Set(
+          poItems
+            .filter(i => (i.itemName || "").toLowerCase().includes(s) || (i.description || "").toLowerCase().includes(s) || (i.itemSku || "").toLowerCase().includes(s))
+            .map(i => i.purchaseOrderId)
         );
-        conditions.push(searchConditions);
+        items = items.filter(p => {
+          if ((p.poNumber || "").toLowerCase().includes(s)) return true;
+          if ((p.supplier || "").toLowerCase().includes(s)) return true;
+          if ((p.notes || "").toLowerCase().includes(s)) return true;
+          const d = p.createdAt;
+          const ymd = d.toISOString().slice(0, 10);
+          const my = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const y = String(d.getFullYear());
+          if (ymd.includes(s) || my.includes(s) || y.includes(s)) return true;
+          if (poIdsWithMatchingItems.has(p.id)) return true;
+          return false;
+        });
       }
-      if (supplierId) conditions.push(eq(purchaseOrders.supplierId, supplierId));
-      if (deliveryStatus) conditions.push(eq(purchaseOrders.deliveryStatus, deliveryStatus as any));
-      if (paymentStatus) conditions.push(eq(purchaseOrders.paymentStatus, paymentStatus as any));
-      if (dateFrom) conditions.push(gte(purchaseOrders.createdAt, new Date(dateFrom)));
-      if (dateTo) conditions.push(lte(purchaseOrders.createdAt, new Date(dateTo)));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const [countResult] = await db.select({ count: count() }).from(purchaseOrders).where(where);
-      const total = countResult?.count || 0;
-      const totalPages = Math.ceil(total / limit);
-      const items = await db.select().from(purchaseOrders).where(where).orderBy(desc(purchaseOrders.createdAt)).limit(limit).offset((page - 1) * limit);
-      return { items, total, page, limit, totalPages };
+      items = items.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      const total = items.length;
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      const start = (page - 1) * limit;
+      const pageItems = items.slice(start, start + limit);
+      return { items: pageItems, total, page, limit, totalPages };
     }),
 
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [po] = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.id));
+      const po = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       if (!po) throw new Error("Purchase order not found");
-      const items = await db.select().from(purchaseOrderItems).where(eq(purchaseOrderItems.purchaseOrderId, input.id));
-      const payments = await db.select().from(poPayments).where(eq(poPayments.purchaseOrderId, input.id)).orderBy(desc(poPayments.createdAt));
+      const [items, payments] = await Promise.all([
+        fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] }),
+        fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.id]] }),
+      ]);
+      payments.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return { ...po, items, payments };
     }),
 
@@ -695,15 +897,13 @@ export const appRouter = router({
         unitPrice: z.string().optional(),
       })).min(1),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const poNumber = `PO-${Date.now().toString(36).toUpperCase()}`;
       // Calculate subtotal
       let subtotal = 0;
       const lineItems = input.items.map(item => {
         const lineTotal = item.quantity * parseFloat(item.unitPrice || "0");
         subtotal += lineTotal;
-        return { ...item, lineTotal: lineTotal.toFixed(2), unitPrice: item.unitPrice || "0" };
+        return { ...item, lineTotal: money(lineTotal), unitPrice: item.unitPrice || "0" };
       });
       // Apply discount
       let discountAmount = 0;
@@ -719,36 +919,40 @@ export const appRouter = router({
         vatAmount = afterDiscount * (parseFloat(input.vatRate || "12") / 100);
       }
       const totalAmount = afterDiscount + vatAmount;
-      const [result] = await db.insert(purchaseOrders).values({
+      const poId = await fsInsertOne("purchase_orders", {
         poNumber,
         supplier: input.supplier,
-        supplierId: input.supplierId,
-        totalAmount: totalAmount.toFixed(2),
+        supplierId: input.supplierId ?? null,
+        status: "draft",
+        deliveryStatus: "not_delivered",
+        paymentStatus: "unpaid",
+        totalAmount: money(totalAmount),
+        paidAmount: "0",
         vatEnabled: input.vatEnabled ? 1 : 0,
         vatRate: input.vatRate || "12",
         discountType: input.discountType || "none",
         discountValue: input.discountValue || "0",
-        notes: input.notes,
+        notes: input.notes ?? null,
         orderedAt: input.orderedAt ? new Date(input.orderedAt) : null,
+        receivedAt: null,
+        deliveredAt: null,
         createdBy: ctx.user.id,
         createdByName: ctx.user.name || 'Unknown',
       });
-      const poId = result.insertId;
       // Insert line items
-      for (const item of lineItems) {
-        await db.insert(purchaseOrderItems).values({
-          purchaseOrderId: poId,
-          itemId: item.itemId,
-          itemName: item.itemName,
-          itemSku: item.itemSku,
-          description: item.description,
-          unit: item.unit,
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          lineTotal: item.lineTotal,
-        });
-      }
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "purchase_order", details: `Created PO: ${poNumber} for ${input.supplier} with ${input.items.length} items, total ₱${totalAmount.toLocaleString()}` });
+      await fsInsertMany("purchase_order_items", lineItems.map(item => ({
+        purchaseOrderId: poId,
+        itemId: item.itemId,
+        itemName: item.itemName ?? null,
+        itemSku: item.itemSku ?? null,
+        description: item.description ?? null,
+        unit: item.unit ?? null,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
+        receivedQuantity: 0,
+      })));
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "purchase_order", poId, `Created PO: ${poNumber} for ${input.supplier} with ${input.items.length} items, total ₱${totalAmount.toLocaleString()}`);
       return { success: true, poId, poNumber };
     }),
 
@@ -764,9 +968,7 @@ export const appRouter = router({
       discountValue: z.string().optional(),
       recalculate: z.boolean().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const updates: any = {};
+      const updates: Record<string, unknown> = {};
       if (input.status) updates.status = input.status;
       if (input.deliveryStatus) updates.deliveryStatus = input.deliveryStatus;
       if (input.paymentStatus) updates.paymentStatus = input.paymentStatus;
@@ -778,7 +980,7 @@ export const appRouter = router({
       if (input.discountValue !== undefined) updates.discountValue = input.discountValue;
       // Recalculate total if VAT/discount changed
       if (input.recalculate) {
-        const items = await db.select().from(purchaseOrderItems).where(eq(purchaseOrderItems.purchaseOrderId, input.id));
+        const items = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] });
         let subtotal = 0;
         for (const item of items) { subtotal += parseFloat(item.lineTotal || "0"); }
         const vatEnabled = input.vatEnabled !== undefined ? input.vatEnabled : false;
@@ -791,10 +993,10 @@ export const appRouter = router({
         const afterDiscount = subtotal - discountAmount;
         let vatAmount = 0;
         if (vatEnabled) vatAmount = afterDiscount * (vatRate / 100);
-        updates.totalAmount = (afterDiscount + vatAmount).toFixed(2);
+        updates.totalAmount = money(afterDiscount + vatAmount);
       }
-      await db.update(purchaseOrders).set(updates).where(eq(purchaseOrders.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "purchase_order", entityId: input.id, details: `Updated PO #${input.id}: ${JSON.stringify(updates)}` });
+      await fsUpdateOne("purchase_orders", input.id, updates);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "purchase_order", input.id, `Updated PO #${input.id}: ${JSON.stringify(updates)}`);
       return { success: true };
     }),
 
@@ -805,26 +1007,26 @@ export const appRouter = router({
       reference: z.string().optional(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(poPayments).values({
+      await fsInsertOne("po_payments", {
         purchaseOrderId: input.purchaseOrderId,
         amount: input.amount,
         paymentDate: new Date(input.paymentDate),
-        reference: input.reference,
-        notes: input.notes,
+        reference: input.reference ?? null,
+        notes: input.notes ?? null,
         createdBy: ctx.user.id,
       });
       // Recalculate paid amount
-      const [paidResult] = await db.select({ total: sum(poPayments.amount) }).from(poPayments).where(eq(poPayments.purchaseOrderId, input.purchaseOrderId));
-      const paidAmount = parseFloat(paidResult?.total || "0");
-      const [po] = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, input.purchaseOrderId));
+      const [payments, po] = await Promise.all([
+        fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] }),
+        fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId),
+      ]);
+      const paidAmount = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
       const totalAmount = parseFloat(po?.totalAmount || "0");
       let paymentStatus: "unpaid" | "partially_paid" | "paid" = "unpaid";
       if (paidAmount >= totalAmount && totalAmount > 0) paymentStatus = "paid";
       else if (paidAmount > 0) paymentStatus = "partially_paid";
-      await db.update(purchaseOrders).set({ paidAmount: paidAmount.toFixed(2), paymentStatus }).where(eq(purchaseOrders.id, input.purchaseOrderId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "payment", entity: "purchase_order", entityId: input.purchaseOrderId, details: `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Ref: ${input.reference || 'N/A'}` });
+      await fsUpdateOne("purchase_orders", input.purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
+      await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Ref: ${input.reference || 'N/A'}`);
       return { success: true };
     }),
 
@@ -833,21 +1035,17 @@ export const appRouter = router({
       supplierId: z.number(),
       itemId: z.number(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const [record] = await db.select().from(supplierItemPrices)
-        .where(and(eq(supplierItemPrices.supplierId, input.supplierId), eq(supplierItemPrices.inventoryItemId, input.itemId)));
-      return record || null;
+      const records = await fsListAll<SupplierItemPrice>("supplier_item_prices", {
+        where: [["supplierId", "==", input.supplierId], ["inventoryItemId", "==", input.itemId]],
+      });
+      return records[0] || null;
     }),
 
     // Get all supplier prices for a given supplier (used in PO create)
     getSupplierPrices: protectedProcedure.input(z.object({
       supplierId: z.number(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(supplierItemPrices)
-        .where(eq(supplierItemPrices.supplierId, input.supplierId));
+      return fsListAll<SupplierItemPrice>("supplier_item_prices", { where: [["supplierId", "==", input.supplierId]] });
     }),
 
     // Update supplier-item price record (upsert)
@@ -857,23 +1055,23 @@ export const appRouter = router({
       unitPrice: z.string(),
       purchaseOrderId: z.number().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       // Upsert: check if record exists
-      const [existing] = await db.select().from(supplierItemPrices)
-        .where(and(eq(supplierItemPrices.supplierId, input.supplierId), eq(supplierItemPrices.inventoryItemId, input.inventoryItemId)));
+      const existingRows = await fsListAll<SupplierItemPrice>("supplier_item_prices", {
+        where: [["supplierId", "==", input.supplierId], ["inventoryItemId", "==", input.inventoryItemId]],
+      });
+      const existing = existingRows[0];
       if (existing) {
-        await db.update(supplierItemPrices).set({
+        await fsUpdateOne("supplier_item_prices", existing.id, {
           unitPrice: input.unitPrice,
-          lastPurchaseOrderId: input.purchaseOrderId,
+          lastPurchaseOrderId: input.purchaseOrderId ?? null,
           updatedBy: ctx.user.id,
-        }).where(eq(supplierItemPrices.id, existing.id));
+        });
       } else {
-        await db.insert(supplierItemPrices).values({
+        await fsInsertOne("supplier_item_prices", {
           supplierId: input.supplierId,
           inventoryItemId: input.inventoryItemId,
           unitPrice: input.unitPrice,
-          lastPurchaseOrderId: input.purchaseOrderId,
+          lastPurchaseOrderId: input.purchaseOrderId ?? null,
           updatedBy: ctx.user.id,
         });
       }
@@ -886,121 +1084,106 @@ export const appRouter = router({
       purchasePrice: z.string(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       // Get current price for history
-      const [currentItem] = await db.select({ purchasePrice: inventoryItems.purchasePrice }).from(inventoryItems).where(eq(inventoryItems.id, input.itemId));
+      const currentItem = await fsGetById<InventoryItem>("inventory_items", input.itemId);
       const oldPrice = currentItem?.purchasePrice || "0";
       if (oldPrice !== input.purchasePrice) {
-        await db.insert(itemPriceHistory).values({ itemId: input.itemId, priceType: "purchase", oldPrice, newPrice: input.purchasePrice, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: input.notes || null });
+        await fsInsertOne("item_price_history", { itemId: input.itemId, priceType: "purchase", oldPrice, newPrice: input.purchasePrice, changedBy: ctx.user.id, changedByName: ctx.user.name || "Unknown", notes: input.notes || null });
       }
-      await db.update(inventoryItems).set({ purchasePrice: input.purchasePrice }).where(eq(inventoryItems.id, input.itemId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update_price", entity: "inventory_item", entityId: input.itemId, details: `Updated purchase price to ₱${input.purchasePrice}` });
+      await fsUpdateOne("inventory_items", input.itemId, { purchasePrice: input.purchasePrice });
+      await fsAudit(ctx.user.id, ctx.user.name, "update_price", "inventory_item", input.itemId, `Updated purchase price to ₱${input.purchasePrice}`);
       return { success: true };
     }),
 
     // Analytics: purchases by supplier
     analyticsBySupplier: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({
-        supplierId: purchaseOrders.supplierId,
-        supplier: purchaseOrders.supplier,
-        totalPOs: count(),
-        totalValue: sum(purchaseOrders.totalAmount),
-        totalPaid: sum(purchaseOrders.paidAmount),
-      }).from(purchaseOrders).groupBy(purchaseOrders.supplierId, purchaseOrders.supplier).orderBy(desc(sum(purchaseOrders.totalAmount)));
-      return result;
+      const allPos = await fsListAll<PurchaseOrder>("purchase_orders");
+      const groups = new Map<string, { supplierId: number | null; supplier: string; totalPOs: number; totalValue: number; totalPaid: number }>();
+      for (const po of allPos) {
+        const key = `${po.supplierId ?? "null"}::${po.supplier}`;
+        const g = groups.get(key) ?? { supplierId: po.supplierId, supplier: po.supplier, totalPOs: 0, totalValue: 0, totalPaid: 0 };
+        g.totalPOs += 1;
+        g.totalValue += Number(po.totalAmount || 0);
+        g.totalPaid += Number(po.paidAmount || 0);
+        groups.set(key, g);
+      }
+      return Array.from(groups.values())
+        .sort((a, b) => b.totalValue - a.totalValue)
+        .map(g => ({ supplierId: g.supplierId, supplier: g.supplier, totalPOs: g.totalPOs, totalValue: money(g.totalValue), totalPaid: money(g.totalPaid) }));
     }),
 
     // Analytics: outstanding POs
     analyticsOutstanding: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return { unpaid: 0, partiallyPaid: 0, notDelivered: 0, partiallyDelivered: 0 };
-      const [unpaidCount] = await db.select({ count: count() }).from(purchaseOrders).where(eq(purchaseOrders.paymentStatus, "unpaid"));
-      const [partiallyPaidCount] = await db.select({ count: count() }).from(purchaseOrders).where(eq(purchaseOrders.paymentStatus, "partially_paid"));
-      const [notDeliveredCount] = await db.select({ count: count() }).from(purchaseOrders).where(eq(purchaseOrders.deliveryStatus, "not_delivered"));
-      const [partiallyDeliveredCount] = await db.select({ count: count() }).from(purchaseOrders).where(eq(purchaseOrders.deliveryStatus, "partially_delivered"));
-      return {
-        unpaid: unpaidCount?.count || 0,
-        partiallyPaid: partiallyPaidCount?.count || 0,
-        notDelivered: notDeliveredCount?.count || 0,
-        partiallyDelivered: partiallyDeliveredCount?.count || 0,
-      };
+      const allPos = await fsListAll<PurchaseOrder>("purchase_orders", { select: ["paymentStatus", "deliveryStatus"] });
+      let unpaid = 0, partiallyPaid = 0, notDelivered = 0, partiallyDelivered = 0;
+      for (const po of allPos) {
+        if (po.paymentStatus === "unpaid") unpaid++;
+        else if (po.paymentStatus === "partially_paid") partiallyPaid++;
+        if (po.deliveryStatus === "not_delivered") notDelivered++;
+        else if (po.deliveryStatus === "partially_delivered") partiallyDelivered++;
+      }
+      return { unpaid, partiallyPaid, notDelivered, partiallyDelivered };
     }),
   }),
 
   // ============ BOM PACKAGES ============
   bom: router({
     list: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(bomPackages).orderBy(desc(bomPackages.createdAt)).limit(200);
+      const packages = await fsListAll<BomPackage>("bom_packages");
+      return packages
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 200);
     }),
     getItems: protectedProcedure.input(z.object({ packageId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({
-        id: bomPackageItems.id,
-        packageId: bomPackageItems.packageId,
-        itemId: bomPackageItems.itemId,
-        quantity: bomPackageItems.quantity,
-        itemName: inventoryItems.name,
-        itemSku: inventoryItems.sku,
-        sellingPrice: inventoryItems.sellingPrice,
-      }).from(bomPackageItems)
-        .leftJoin(inventoryItems, eq(bomPackageItems.itemId, inventoryItems.id))
-        .where(eq(bomPackageItems.packageId, input.packageId));
-      return result;
+      const [bomItems, items] = await Promise.all([
+        fsListAll<BomPackageItem>("bom_package_items", { where: [["packageId", "==", input.packageId]] }),
+        fsListAll<InventoryItem>("inventory_items"),
+      ]);
+      const itemMap = new Map(items.map(i => [i.id, i]));
+      return bomItems.map(bi => {
+        const it = itemMap.get(bi.itemId);
+        return {
+          ...bi,
+          itemName: it?.name ?? null,
+          itemSku: it?.sku ?? null,
+          sellingPrice: it?.sellingPrice ?? null,
+        };
+      });
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1), description: z.string().optional(),
       systemSize: z.string().optional(), systemType: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(bomPackages).values({ ...input, createdBy: ctx.user.id });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "bom_package", details: `Created BOM: ${input.name}` });
+      const id = await fsInsertOne("bom_packages", {
+        name: input.name,
+        description: input.description ?? null,
+        systemSize: input.systemSize ?? null,
+        systemType: input.systemType ?? null,
+        totalCost: null,
+        createdBy: ctx.user.id,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "bom_package", id, `Created BOM: ${input.name}`);
       return { success: true };
     }),
     addItem: protectedProcedure.input(z.object({
       packageId: z.number(), itemId: z.number(), quantity: z.number().min(1),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(bomPackageItems).values(input);
-      // Recalculate total cost
-      const items = await db.select({
-        quantity: bomPackageItems.quantity,
-        price: inventoryItems.sellingPrice,
-      }).from(bomPackageItems)
-        .leftJoin(inventoryItems, eq(bomPackageItems.itemId, inventoryItems.id))
-        .where(eq(bomPackageItems.packageId, input.packageId));
-      const totalCost = items.reduce((sum, i) => sum + (i.quantity * Number(i.price || 0)), 0);
-      await db.update(bomPackages).set({ totalCost: totalCost.toFixed(2) }).where(eq(bomPackages.id, input.packageId));
+      await fsInsertOne("bom_package_items", {
+        packageId: input.packageId, itemId: input.itemId, quantity: input.quantity,
+      });
+      await recalcBomTotalCost(input.packageId);
       return { success: true };
     }),
     removeItem: protectedProcedure.input(z.object({ id: z.number(), packageId: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(bomPackageItems).where(eq(bomPackageItems.id, input.id));
-      // Recalculate total cost
-      const items = await db.select({
-        quantity: bomPackageItems.quantity,
-        price: inventoryItems.sellingPrice,
-      }).from(bomPackageItems)
-        .leftJoin(inventoryItems, eq(bomPackageItems.itemId, inventoryItems.id))
-        .where(eq(bomPackageItems.packageId, input.packageId));
-      const totalCost = items.reduce((sum, i) => sum + (i.quantity * Number(i.price || 0)), 0);
-      await db.update(bomPackages).set({ totalCost: totalCost.toFixed(2) }).where(eq(bomPackages.id, input.packageId));
+      await fsDeleteOne("bom_package_items", input.id);
+      await recalcBomTotalCost(input.packageId);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(bomPackageItems).where(eq(bomPackageItems.packageId, input.id));
-      await db.delete(bomPackages).where(eq(bomPackages.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "bom_package", entityId: input.id, details: `Deleted BOM #${input.id}` });
+      const packageItems = await fsListAll<BomPackageItem>("bom_package_items", { where: [["packageId", "==", input.id]] });
+      await Promise.all(packageItems.map(pi => fsDeleteOne("bom_package_items", pi.id)));
+      await fsDeleteOne("bom_packages", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "bom_package", input.id, `Deleted BOM #${input.id}`);
       return { success: true };
     }),
   }),
@@ -1019,50 +1202,51 @@ export const appRouter = router({
       page: z.number().default(1),
       limit: z.number().default(20),
     }).optional()).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0 };
-      const filters: any[] = [];
       const p = input || { page: 1, limit: 20 };
-      if (p.search) {
-        filters.push(or(
-          like(quotations.customerName, `%${p.search}%`),
-          like(quotations.title, `%${p.search}%`),
-          like(quotations.quoteNumber, `%${p.search}%`),
-          like(quotations.customerAddress, `%${p.search}%`),
-          like(quotations.customerEmail, `%${p.search}%`),
-          like(quotations.notes, `%${p.search}%`),
-          sql`EXISTS (SELECT 1 FROM accounts WHERE accounts.id = ${quotations.accountId} AND accounts.name LIKE ${`%${p.search}%`})`,
-          sql`DATE_FORMAT(${quotations.createdAt}, '%Y-%m-%d') LIKE ${`%${p.search}%`}`,
-          sql`DATE_FORMAT(${quotations.createdAt}, '%m/%Y') LIKE ${`%${p.search}%`}`,
-          sql`DATE_FORMAT(${quotations.createdAt}, '%Y') LIKE ${`%${p.search}%`}`
-        ));
-      }
-      if (p.address) filters.push(like(quotations.customerAddress, `%${p.address}%`));
-      if (p.kwRating) filters.push(like(quotations.title, `%${p.kwRating}%`));
-      if (p.setupType) filters.push(like(quotations.title, `%${p.setupType}%`));
+      const [allQuotes, accountsAll] = await Promise.all([
+        fsListAll<Quotation>("quotations"),
+        p.search ? fsListAll<Account>("accounts") : Promise.resolve([] as Account[]),
+      ]);
+      const accountMap = new Map(accountsAll.map(a => [a.id, a]));
+      let items = allQuotes;
+      if (p.address) items = items.filter(q => (q.customerAddress || "").toLowerCase().includes(p.address!.toLowerCase()));
+      if (p.kwRating) items = items.filter(q => (q.title || "").toLowerCase().includes(p.kwRating!.toLowerCase()));
+      if (p.setupType) items = items.filter(q => (q.title || "").toLowerCase().includes(p.setupType!.toLowerCase()));
       if (p.year) {
-        const startOfYear = new Date(p.year, (p.month || 1) - 1, 1);
-        const endDate = p.month ? new Date(p.year, p.month, 0, 23, 59, 59) : new Date(p.year, 11, 31, 23, 59, 59);
-        filters.push(gte(quotations.createdAt, startOfYear));
-        filters.push(lte(quotations.createdAt, endDate));
+        const startOfYear = new Date(p.year, (p.month || 1) - 1, 1).getTime();
+        const endDate = (p.month ? new Date(p.year, p.month, 0, 23, 59, 59) : new Date(p.year, 11, 31, 23, 59, 59)).getTime();
+        items = items.filter(q => q.createdAt.getTime() >= startOfYear && q.createdAt.getTime() <= endDate);
       }
-      if (p.dateFrom) filters.push(gte(quotations.createdAt, new Date(p.dateFrom)));
-      if (p.dateTo) filters.push(lte(quotations.createdAt, new Date(p.dateTo + "T23:59:59")));
-      const where = filters.length > 0 ? and(...filters) : undefined;
-      const [totalResult] = await db.select({ count: count() }).from(quotations).where(where);
-      const items = await db.select().from(quotations).where(where).orderBy(desc(quotations.createdAt)).limit(p.limit).offset((p.page - 1) * p.limit);
-      return { items, total: totalResult?.count || 0 };
+      if (p.dateFrom) { const from = new Date(p.dateFrom).getTime(); items = items.filter(q => q.createdAt.getTime() >= from); }
+      if (p.dateTo) { const to = new Date(p.dateTo + "T23:59:59").getTime(); items = items.filter(q => q.createdAt.getTime() <= to); }
+      if (p.search) {
+        const s = p.search.trim().toLowerCase();
+        items = items.filter(q => {
+          if ((q.customerName || "").toLowerCase().includes(s)) return true;
+          if ((q.title || "").toLowerCase().includes(s)) return true;
+          if ((q.quoteNumber || "").toLowerCase().includes(s)) return true;
+          if ((q.customerAddress || "").toLowerCase().includes(s)) return true;
+          if ((q.customerEmail || "").toLowerCase().includes(s)) return true;
+          if ((q.notes || "").toLowerCase().includes(s)) return true;
+          const acct = q.accountId ? accountMap.get(q.accountId) : undefined;
+          if (acct && (acct.name || "").toLowerCase().includes(s)) return true;
+          const d = q.createdAt;
+          const ymd = d.toISOString().slice(0, 10);
+          const my = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const y = String(d.getFullYear());
+          return ymd.includes(s) || my.includes(s) || y.includes(s);
+        });
+      }
+      items = items.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      const total = items.length;
+      const pageItems = items.slice((p.page - 1) * p.limit, (p.page - 1) * p.limit + p.limit);
+      return { items: pageItems, total };
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const [q] = await db.select().from(quotations).where(eq(quotations.id, input.id)).limit(1);
-      return q || null;
+      return (await fsGetById<Quotation>("quotations", input.id)) || null;
     }),
     getItems: protectedProcedure.input(z.object({ quotationId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(quotationItems).where(eq(quotationItems.quotationId, input.quotationId));
+      return fsListAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", input.quotationId]] });
     }),
     create: protectedProcedure.input(z.object({
       title: z.string().min(1), contactId: z.number().optional(),
@@ -1075,41 +1259,68 @@ export const appRouter = router({
       laborCost: z.string().optional(), installationFee: z.string().optional(),
       paymentTerms: z.string().optional(), warrantyTerms: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const quoteNumber = `QT-${Date.now().toString(36).toUpperCase()}`;
-      const { vatEnabled, ...rest } = input;
       // Auto-create contact if customerName is provided but no contactId is linked
-      let contactId = input.contactId;
+      let contactId: number | null = input.contactId ?? null;
       if (!contactId && input.customerName && input.customerName.trim()) {
         // Check if contact already exists with this name
         const nameParts = input.customerName.trim().split(/\s+/);
         const firstName = nameParts[0];
         const lastName = nameParts.slice(1).join(' ') || null;
-        const existingContacts = await db.select({ id: contacts.id }).from(contacts)
-          .where(and(
-            eq(contacts.firstName, firstName),
-            lastName ? eq(contacts.lastName, lastName) : sql`${contacts.lastName} IS NULL OR ${contacts.lastName} = ''`
-          )).limit(1);
-        if (existingContacts.length > 0) {
-          contactId = existingContacts[0].id;
+        const candidates = await fsListAll<Contact>("contacts", { where: [["firstName", "==", firstName]] });
+        const existing = candidates.find(c => (lastName ? c.lastName === lastName : (!c.lastName || c.lastName === "")));
+        if (existing) {
+          contactId = existing.id;
         } else {
           // Create new contact
-          const [newContact] = await db.insert(contacts).values({
+          contactId = await fsInsertOne("contacts", {
             firstName,
             lastName,
             email: input.customerEmail || null,
             phone: input.customerPhone || null,
+            company: null,
+            position: null,
             address: input.customerAddress || null,
+            city: null,
+            notes: null,
             createdBy: ctx.user.id,
           });
-          contactId = newContact.insertId;
-          await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "contact", details: `Auto-created contact: ${input.customerName} (from quotation)` });
+          await fsAudit(ctx.user.id, ctx.user.name, "create", "contact", contactId, `Auto-created contact: ${input.customerName} (from quotation)`);
         }
       }
-      const { contactId: _cid, ...restWithoutContact } = rest;
-      await db.insert(quotations).values({ ...restWithoutContact, contactId, vatEnabled: vatEnabled ? 1 : 0, quoteNumber, createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown' });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "quotation", details: `Created quotation: ${quoteNumber}` });
+      const id = await fsInsertOne("quotations", {
+        title: input.title,
+        version: 1,
+        status: "draft",
+        opportunityId: input.opportunityId ?? null,
+        contactId,
+        accountId: input.accountId ?? null,
+        customerName: input.customerName ?? null,
+        customerEmail: input.customerEmail ?? null,
+        customerPhone: input.customerPhone ?? null,
+        customerAddress: input.customerAddress ?? null,
+        subtotal: null,
+        discountPercent: input.discountPercent ?? null,
+        discountManualAmount: input.discountManualAmount ?? null,
+        discountAmount: null,
+        vatEnabled: input.vatEnabled ? 1 : 0,
+        taxPercent: input.taxPercent ?? null,
+        taxAmount: null,
+        totalAmount: null,
+        laborCost: input.laborCost ?? null,
+        installationFee: input.installationFee ?? null,
+        lastEditedBy: null,
+        paymentTerms: input.paymentTerms ?? null,
+        warrantyTerms: input.warrantyTerms ?? null,
+        validUntil: null,
+        notes: input.notes ?? null,
+        approvedBy: null,
+        approvedAt: null,
+        quoteNumber,
+        createdBy: ctx.user.id,
+        createdByName: ctx.user.name || 'Unknown',
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "quotation", id, `Created quotation: ${quoteNumber}`);
       return { success: true };
     }),
     update: protectedProcedure.input(z.object({
@@ -1124,180 +1335,116 @@ export const appRouter = router({
       paymentTerms: z.string().optional(), warrantyTerms: z.string().optional(),
       status: z.enum(["draft", "pending_approval", "approved", "sent", "accepted", "rejected", "expired"]).optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, vatEnabled, ...fields } = input;
-      const updateData: any = { ...fields, lastEditedBy: ctx.user.id };
+      const updateData: Record<string, unknown> = { ...fields, lastEditedBy: ctx.user.id };
       if (vatEnabled !== undefined) updateData.vatEnabled = vatEnabled ? 1 : 0;
-      await db.update(quotations).set(updateData).where(eq(quotations.id, id));
-      // Recalculate totals after update
-      const items = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, id));
-      const subtotal = items.reduce((sum, i) => sum + Number(i.totalPrice), 0);
-      const [quote] = await db.select().from(quotations).where(eq(quotations.id, id)).limit(1);
-      const discountPct = Number(quote?.discountPercent || 0);
-      const manualDiscount = Number(quote?.discountManualAmount || 0);
-      const taxPct = quote?.vatEnabled ? Number(quote?.taxPercent || 0) : 0;
-      const labor = Number(quote?.laborCost || 0);
-      const installation = Number(quote?.installationFee || 0);
-      const percentageDiscountAmt = subtotal * (discountPct / 100);
-      const totalDiscountAmt = percentageDiscountAmt + manualDiscount;
-      const afterDiscount = subtotal - totalDiscountAmt;
-      const taxAmt = afterDiscount * (taxPct / 100);
-      const total = afterDiscount + taxAmt + labor + installation;
-      await db.update(quotations).set({
-        subtotal: subtotal.toFixed(2),
-        discountAmount: totalDiscountAmt.toFixed(2),
-        taxAmount: taxAmt.toFixed(2),
-        totalAmount: total.toFixed(2),
-      }).where(eq(quotations.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "quotation", entityId: id, details: `Updated quotation #${id}` });
+      await fsUpdateOne("quotations", id, updateData);
+      await recalcQuotationTotals(id);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "quotation", id, `Updated quotation #${id}`);
       return { success: true };
     }),
     addItem: protectedProcedure.input(z.object({
       quotationId: z.number(), itemId: z.number().optional(), itemType: z.enum(["inventory", "labor", "custom"]).default("inventory"),
       description: z.string().min(1), quantity: z.number().min(1), unitPrice: z.string(),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const totalPrice = (input.quantity * Number(input.unitPrice)).toFixed(2);
-      await db.insert(quotationItems).values({ ...input, unitPrice: input.unitPrice, totalPrice });
-      // Recalculate quotation totals
-      const items = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, input.quotationId));
-      const subtotal = items.reduce((sum, i) => sum + Number(i.totalPrice), 0);
-      const [quote] = await db.select().from(quotations).where(eq(quotations.id, input.quotationId)).limit(1);
-      const discountPct = Number(quote?.discountPercent || 0);
-      const manualDiscount = Number(quote?.discountManualAmount || 0);
-      const taxPct = quote?.vatEnabled ? Number(quote?.taxPercent || 0) : 0;
-      const labor = Number(quote?.laborCost || 0);
-      const installation = Number(quote?.installationFee || 0);
-      const percentageDiscountAmt = subtotal * (discountPct / 100);
-      const totalDiscountAmt = percentageDiscountAmt + manualDiscount;
-      const afterDiscount = subtotal - totalDiscountAmt;
-      const taxAmt = afterDiscount * (taxPct / 100);
-      const total = afterDiscount + taxAmt + labor + installation;
-      await db.update(quotations).set({
-        subtotal: subtotal.toFixed(2),
-        discountAmount: totalDiscountAmt.toFixed(2),
-        taxAmount: taxAmt.toFixed(2),
-        totalAmount: total.toFixed(2),
-      }).where(eq(quotations.id, input.quotationId));
+      const totalPrice = money(input.quantity * Number(input.unitPrice));
+      await fsInsertOne("quotation_items", {
+        quotationId: input.quotationId,
+        itemId: input.itemId ?? null,
+        itemType: input.itemType,
+        description: input.description,
+        quantity: input.quantity,
+        unitPrice: input.unitPrice,
+        totalPrice,
+      });
+      await recalcQuotationTotals(input.quotationId);
       return { success: true };
     }),
     removeItem: protectedProcedure.input(z.object({ id: z.number(), quotationId: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(quotationItems).where(eq(quotationItems.id, input.id));
-      // Recalculate totals
-      const items = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, input.quotationId));
-      const subtotal = items.reduce((sum, i) => sum + Number(i.totalPrice), 0);
-      const [quote] = await db.select().from(quotations).where(eq(quotations.id, input.quotationId)).limit(1);
-      const discountPct = Number(quote?.discountPercent || 0);
-      const manualDiscount = Number(quote?.discountManualAmount || 0);
-      const taxPct = quote?.vatEnabled ? Number(quote?.taxPercent || 0) : 0;
-      const labor = Number(quote?.laborCost || 0);
-      const installation = Number(quote?.installationFee || 0);
-      const percentageDiscountAmt = subtotal * (discountPct / 100);
-      const totalDiscountAmt = percentageDiscountAmt + manualDiscount;
-      const afterDiscount = subtotal - totalDiscountAmt;
-      const taxAmt = afterDiscount * (taxPct / 100);
-      const total = afterDiscount + taxAmt + labor + installation;
-      await db.update(quotations).set({
-        subtotal: subtotal.toFixed(2),
-        discountAmount: totalDiscountAmt.toFixed(2),
-        taxAmount: taxAmt.toFixed(2),
-        totalAmount: total.toFixed(2),
-      }).where(eq(quotations.id, input.quotationId));
+      await fsDeleteOne("quotation_items", input.id);
+      await recalcQuotationTotals(input.quotationId);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(quotationItems).where(eq(quotationItems.quotationId, input.id));
-      await db.delete(quotations).where(eq(quotations.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "quotation", entityId: input.id, details: `Deleted quotation #${input.id}` });
+      const items = await fsListAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", input.id]] });
+      await Promise.all(items.map(i => fsDeleteOne("quotation_items", i.id)));
+      await fsDeleteOne("quotations", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "quotation", input.id, `Deleted quotation #${input.id}`);
       return { success: true };
     }),
     createDeliveryReceipt: protectedProcedure.input(z.object({
       quotationId: z.number(), deliveryDate: z.string(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [quote] = await db.select().from(quotations).where(eq(quotations.id, input.quotationId)).limit(1);
+      const quote = await fsGetById<Quotation>("quotations", input.quotationId);
       if (!quote) throw new Error("Quotation not found");
       const receiptNumber = `DR-${Date.now().toString(36).toUpperCase()}`;
-      const [inserted] = await db.insert(deliveryReceipts).values({
+      const id = await fsInsertOne("delivery_receipts", {
         quotationId: input.quotationId, receiptNumber, deliveryDate: new Date(input.deliveryDate),
-        customerName: quote.customerName, customerAddress: quote.customerAddress,
-        projectReference: quote.title, notes: input.notes,
+        customerName: quote.customerName ?? null, customerAddress: quote.customerAddress ?? null,
+        projectReference: quote.title ?? null, notes: input.notes ?? null,
         createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
-      }).$returningId();
-      return { success: true, receiptNumber, id: inserted.id };
+      });
+      return { success: true, receiptNumber, id };
     }),
     getDeliveryReceipts: protectedProcedure.input(z.object({ quotationId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(deliveryReceipts).where(eq(deliveryReceipts.quotationId, input.quotationId)).orderBy(desc(deliveryReceipts.createdAt));
+      const receipts = await fsListAll<DeliveryReceipt>("delivery_receipts", { where: [["quotationId", "==", input.quotationId]] });
+      return receipts.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
     createAcknowledgement: protectedProcedure.input(z.object({
       quotationId: z.number(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [quote] = await db.select().from(quotations).where(eq(quotations.id, input.quotationId)).limit(1);
+      const quote = await fsGetById<Quotation>("quotations", input.quotationId);
       if (!quote) throw new Error("Quotation not found");
       const receiptNumber = `ACK-${Date.now().toString(36).toUpperCase()}`;
-      const [insertedAck] = await db.insert(acknowledgementReceipts).values({
+      const id = await fsInsertOne("acknowledgement_receipts", {
         type: "quotation", referenceId: input.quotationId, receiptNumber,
-        customerName: quote.customerName, projectReference: quote.title,
-        amount: quote.totalAmount, notes: input.notes,
+        customerName: quote.customerName ?? null, projectReference: quote.title ?? null,
+        amount: quote.totalAmount ?? null, paymentDate: null, paymentMethod: null, paymentReference: null,
+        notes: input.notes ?? null,
         createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
-      }).$returningId();
-      return { success: true, receiptNumber, id: insertedAck.id };
+      });
+      return { success: true, receiptNumber, id };
     }),
     getAcknowledgements: protectedProcedure.input(z.object({ quotationId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(acknowledgementReceipts).where(and(eq(acknowledgementReceipts.type, "quotation"), eq(acknowledgementReceipts.referenceId, input.quotationId))).orderBy(desc(acknowledgementReceipts.createdAt));
+      const acks = await fsListAll<AcknowledgementReceipt>("acknowledgement_receipts", {
+        where: [["type", "==", "quotation"], ["referenceId", "==", input.quotationId]],
+      });
+      return acks.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
   }),
 
   // ============ NET METERING PAYMENTS ============
   netMeteringPayments: router({
     list: protectedProcedure.input(z.object({ projectId: z.number().optional(), netMeteringId: z.number().optional() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const filters: any[] = [];
-      if (input.projectId) filters.push(eq(netMeteringPayments.projectId, input.projectId));
-      if (input.netMeteringId) filters.push(eq(netMeteringPayments.netMeteringId, input.netMeteringId));
-      const where = filters.length > 0 ? and(...filters) : undefined;
-      const payments = await db.select().from(netMeteringPayments).where(where).orderBy(desc(netMeteringPayments.paymentDate));
-      // Attach lastAckId for re-print capability
-      const paymentIds = payments.map(p => p.id);
-      if (paymentIds.length === 0) return payments;
-      const acks = await db.select().from(acknowledgementReceipts).where(and(eq(acknowledgementReceipts.type, "net_metering_payment"), inArray(acknowledgementReceipts.referenceId, paymentIds)));
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.projectId) filters.push(["projectId", "==", input.projectId]);
+      if (input.netMeteringId) filters.push(["netMeteringId", "==", input.netMeteringId]);
+      const [payments, acks] = await Promise.all([
+        fsListAll<NetMeteringPayment>("net_metering_payments", { where: filters }),
+        fsListAll<AcknowledgementReceipt>("acknowledgement_receipts", { where: [["type", "==", "net_metering_payment"]] }),
+      ]);
       const ackMap = new Map<number, number>();
       acks.forEach(a => { if (!ackMap.has(a.referenceId) || a.id > ackMap.get(a.referenceId)!) ackMap.set(a.referenceId, a.id); });
-      return payments.map(p => ({ ...p, lastAckId: ackMap.get(p.id) || null }));
+      return payments
+        .slice()
+        .sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())
+        .map(p => ({ ...p, lastAckId: ackMap.get(p.id) || null }));
     }),
     add: protectedProcedure.input(z.object({
       projectId: z.number(), netMeteringId: z.number(),
       paymentDate: z.string(), amount: z.string(), paymentMethod: z.string().optional(),
       paymentReference: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(netMeteringPayments).values({
+      await fsInsertOne("net_metering_payments", {
         projectId: input.projectId, netMeteringId: input.netMeteringId,
         paymentDate: new Date(input.paymentDate), amount: input.amount,
-        paymentMethod: input.paymentMethod, paymentReference: input.paymentReference,
-        notes: input.notes, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
+        paymentMethod: input.paymentMethod ?? null, paymentReference: input.paymentReference ?? null,
+        notes: input.notes ?? null, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
       });
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(netMeteringPayments).where(eq(netMeteringPayments.id, input.id));
+      await fsDeleteOne("net_metering_payments", input.id);
       return { success: true };
     }),
     centralList: protectedProcedure.input(z.object({
@@ -1309,28 +1456,30 @@ export const appRouter = router({
       page: z.number().default(1),
       limit: z.number().default(20),
     }).optional()).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0 };
       const p = input || { page: 1, limit: 20 };
-      // Get all net metering records with their payments
-      const nmRecords = await db.select().from(netMetering).orderBy(desc(netMetering.createdAt));
-      const allPayments = await db.select().from(netMeteringPayments);
-      const projectsList = await db.select({ id: projects.id, name: projects.name, customerName: projects.customerName }).from(projects);
-      const projectMap = Object.fromEntries(projectsList.map(p => [p.id, p]));
-      let results = nmRecords.map(nm => {
-        const payments = allPayments.filter(p => p.netMeteringId === nm.id);
-        const totalPaid = payments.reduce((s, p) => s + Number(p.amount), 0);
-        const lastPayment = payments.length > 0 ? payments.sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime())[0] : null;
-        const project = nm.projectId ? projectMap[nm.projectId] : null;
-        return {
-          id: nm.id, projectId: nm.projectId, projectName: project?.name || nm.projectName || "-",
-          customerName: project?.customerName || nm.clientName || "-",
-          electricCompany: nm.electricCompany || "-",
-          totalPaid, paymentCount: payments.length,
-          lastPaymentDate: lastPayment?.paymentDate || null,
-          status: nm.status,
-        };
-      });
+      const [nmRecords, allPayments, projectsList] = await Promise.all([
+        fsListAll<NetMetering>("net_metering"),
+        fsListAll<NetMeteringPayment>("net_metering_payments"),
+        fsListAll<Project>("projects", { select: ["name", "customerName"] }),
+      ]);
+      const projectMap = new Map(projectsList.map(pr => [pr.id, pr]));
+      let results = nmRecords
+        .slice()
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .map(nm => {
+          const payments = allPayments.filter(pm => pm.netMeteringId === nm.id);
+          const totalPaid = payments.reduce((s, pm) => s + Number(pm.amount), 0);
+          const lastPayment = payments.length > 0 ? payments.slice().sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())[0] : null;
+          const project = nm.projectId ? projectMap.get(nm.projectId) : null;
+          return {
+            id: nm.id, projectId: nm.projectId, projectName: project?.name || nm.projectName || "-",
+            customerName: project?.customerName || nm.clientName || "-",
+            electricCompany: nm.electricCompany || "-",
+            totalPaid, paymentCount: payments.length,
+            lastPaymentDate: lastPayment?.paymentDate || null,
+            status: nm.status,
+          };
+        });
       // Apply filters
       if (p.search) {
         const s = p.search.toLowerCase();
@@ -1339,12 +1488,12 @@ export const appRouter = router({
       if (p.electricCompany) results = results.filter(r => r.electricCompany.toLowerCase().includes(p.electricCompany!.toLowerCase()));
       if (p.status) results = results.filter(r => r.status === p.status);
       if (p.dateFrom) {
-        const from = new Date(p.dateFrom);
-        results = results.filter(r => r.lastPaymentDate && new Date(r.lastPaymentDate) >= from);
+        const from = new Date(p.dateFrom).getTime();
+        results = results.filter(r => r.lastPaymentDate && r.lastPaymentDate.getTime() >= from);
       }
       if (p.dateTo) {
-        const to = new Date(p.dateTo + "T23:59:59");
-        results = results.filter(r => r.lastPaymentDate && new Date(r.lastPaymentDate) <= to);
+        const to = new Date(p.dateTo + "T23:59:59").getTime();
+        results = results.filter(r => r.lastPaymentDate && r.lastPaymentDate.getTime() <= to);
       }
       const total = results.length;
       const items = results.slice(((p.page || 1) - 1) * (p.limit || 20), (p.page || 1) * (p.limit || 20));
@@ -1357,107 +1506,98 @@ export const appRouter = router({
     createForProjectPayment: protectedProcedure.input(z.object({
       paymentId: z.number(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [payment] = await db.select().from(projectPayments).where(eq(projectPayments.id, input.paymentId)).limit(1);
+      const payment = await fsGetById<ProjectPayment>("project_payments", input.paymentId);
       if (!payment) throw new Error("Payment not found");
-      const [project] = await db.select().from(projects).where(eq(projects.id, payment.projectId)).limit(1);
+      const project = await fsGetById<Project>("projects", payment.projectId);
       const receiptNumber = `ACK-${Date.now().toString(36).toUpperCase()}`;
-      const [insertedPP] = await db.insert(acknowledgementReceipts).values({
+      const id = await fsInsertOne("acknowledgement_receipts", {
         type: "project_payment", referenceId: input.paymentId, receiptNumber,
-        customerName: project?.customerName, projectReference: project?.name,
+        customerName: project?.customerName ?? null, projectReference: project?.name ?? null,
         amount: payment.amount, paymentDate: payment.paymentDate,
-        paymentMethod: payment.paymentMethod, paymentReference: payment.paymentReference,
-        notes: input.notes, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
-      }).$returningId();
-      return { success: true, receiptNumber, id: insertedPP.id };
+        paymentMethod: payment.paymentMethod ?? null, paymentReference: payment.paymentReference ?? null,
+        notes: input.notes ?? null, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
+      });
+      return { success: true, receiptNumber, id };
     }),
     createForNetMeteringPayment: protectedProcedure.input(z.object({
       paymentId: z.number(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [payment] = await db.select().from(netMeteringPayments).where(eq(netMeteringPayments.id, input.paymentId)).limit(1);
+      const payment = await fsGetById<NetMeteringPayment>("net_metering_payments", input.paymentId);
       if (!payment) throw new Error("Payment not found");
-      const [project] = await db.select().from(projects).where(eq(projects.id, payment.projectId)).limit(1);
+      const project = await fsGetById<Project>("projects", payment.projectId);
       const receiptNumber = `ACK-${Date.now().toString(36).toUpperCase()}`;
-      const [insertedNM] = await db.insert(acknowledgementReceipts).values({
+      const id = await fsInsertOne("acknowledgement_receipts", {
         type: "net_metering_payment", referenceId: input.paymentId, receiptNumber,
-        customerName: project?.customerName, projectReference: `${project?.name || ""} - Net Metering`,
+        customerName: project?.customerName ?? null, projectReference: `${project?.name || ""} - Net Metering`,
         amount: payment.amount, paymentDate: payment.paymentDate,
-        paymentMethod: payment.paymentMethod, paymentReference: payment.paymentReference,
-        notes: input.notes, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
-      }).$returningId();
-      return { success: true, receiptNumber, id: insertedNM.id };
+        paymentMethod: payment.paymentMethod ?? null, paymentReference: payment.paymentReference ?? null,
+        notes: input.notes ?? null, createdBy: ctx.user.id, createdByName: ctx.user.name || "Admin",
+      });
+      return { success: true, receiptNumber, id };
     }),
     getForPayment: protectedProcedure.input(z.object({ paymentId: z.number(), type: z.enum(["project_payment", "net_metering_payment"]) })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(acknowledgementReceipts).where(and(eq(acknowledgementReceipts.type, input.type), eq(acknowledgementReceipts.referenceId, input.paymentId))).orderBy(desc(acknowledgementReceipts.createdAt));
+      const acks = await fsListAll<AcknowledgementReceipt>("acknowledgement_receipts", {
+        where: [["type", "==", input.type], ["referenceId", "==", input.paymentId]],
+      });
+      return acks.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
     getForProject: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      // Get all project payment IDs and NM payment IDs for this project
-      const projPayments = await db.select({ id: projectPayments.id }).from(projectPayments).where(eq(projectPayments.projectId, input.projectId));
-      const nmPayments = await db.select({ id: netMeteringPayments.id }).from(netMeteringPayments).where(eq(netMeteringPayments.projectId, input.projectId));
-      const projIds = projPayments.map(p => p.id);
-      const nmIds = nmPayments.map(p => p.id);
-      const allIds = [...projIds, ...nmIds];
-      if (allIds.length === 0) return [];
-      // Get all ack receipts for these payment IDs
-      const results = await db.select().from(acknowledgementReceipts).where(
-        or(
-          projIds.length > 0 ? and(eq(acknowledgementReceipts.type, "project_payment"), inArray(acknowledgementReceipts.referenceId, projIds)) : undefined,
-          nmIds.length > 0 ? and(eq(acknowledgementReceipts.type, "net_metering_payment"), inArray(acknowledgementReceipts.referenceId, nmIds)) : undefined,
-        )
-      ).orderBy(desc(acknowledgementReceipts.createdAt));
-      return results;
+      const [projPayments, nmPayments] = await Promise.all([
+        fsListAll<ProjectPayment>("project_payments", { where: [["projectId", "==", input.projectId]] }),
+        fsListAll<NetMeteringPayment>("net_metering_payments", { where: [["projectId", "==", input.projectId]] }),
+      ]);
+      const projIds = new Set(projPayments.map(p => p.id));
+      const nmIds = new Set(nmPayments.map(p => p.id));
+      if (projIds.size === 0 && nmIds.size === 0) return [];
+      const acks = await fsListAll<AcknowledgementReceipt>("acknowledgement_receipts");
+      return acks
+        .filter(a => (a.type === "project_payment" && projIds.has(a.referenceId)) || (a.type === "net_metering_payment" && nmIds.has(a.referenceId)))
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const [r] = await db.select().from(acknowledgementReceipts).where(eq(acknowledgementReceipts.id, input.id)).limit(1);
-      return r || null;
+      return (await fsGetById<AcknowledgementReceipt>("acknowledgement_receipts", input.id)) || null;
     }),
   }),
 
   // ============ USERS (Admin only) ============
+  // Migrated to Firestore (server/firestore-users.ts + server/firestore.ts).
+  // Firestore has no server-side LIKE/join, so search is done in-memory and
+  // the audit trail's userName is denormalized at write time instead of
+  // joined at read time.
   users: router({
     list: protectedProcedure.input(z.object({ search: z.string().optional() }).optional()).query(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
       const role = ctx.user.role;
-      const search = input?.search;
-      const searchCondition = search ? or(
-        like(users.username, `%${search}%`),
-        like(users.name, `%${search}%`),
-        like(users.email, `%${search}%`),
-        like(users.mobile, `%${search}%`),
-        like(users.role, `%${search}%`)
-      ) : undefined;
+      const search = input?.search?.trim().toLowerCase();
+
+      const matchesSearch = (u: { username: string | null; name: string | null; email: string | null; mobile: string | null; role: string }) => {
+        if (!search) return true;
+        return [u.username, u.name, u.email, u.mobile, u.role].some(
+          v => v != null && String(v).toLowerCase().includes(search)
+        );
+      };
+      const project = (u: Awaited<ReturnType<typeof listUsersRaw>>[number]) => ({
+        id: u.id, name: u.name, username: u.username, email: u.email,
+        mobile: u.mobile, role: u.role, status: u.status,
+        createdAt: u.createdAt, lastSignedIn: u.lastSignedIn, createdBy: u.createdBy,
+        loginMethod: u.loginMethod, totpEnabled: u.totpEnabled,
+      });
+
       // Admin sees all users; SubAdmin sees users they created + themselves
+      let scoped: Awaited<ReturnType<typeof listUsersRaw>>;
       if (role === "admin") {
-        const conditions = searchCondition ? [searchCondition] : [];
-        const where = conditions.length > 0 ? and(...conditions) : undefined;
-        return db.select({
-          id: users.id, name: users.name, username: users.username, email: users.email,
-          mobile: users.mobile, role: users.role, status: users.status,
-          createdAt: users.createdAt, lastSignedIn: users.lastSignedIn, createdBy: users.createdBy,
-          loginMethod: users.loginMethod, passwordPlain: users.passwordPlain,
-          totpEnabled: users.totpEnabled,
-        }).from(users).where(where).orderBy(desc(users.createdAt)).limit(200);
+        scoped = await listUsersRaw();
       } else if (role === "subadmin") {
-        const roleCondition = or(eq(users.createdBy, ctx.user.id), eq(users.id, ctx.user.id));
-        const where = searchCondition ? and(roleCondition, searchCondition) : roleCondition;
-        return db.select({
-          id: users.id, name: users.name, username: users.username, email: users.email,
-          mobile: users.mobile, role: users.role, status: users.status,
-          createdAt: users.createdAt, lastSignedIn: users.lastSignedIn, createdBy: users.createdBy,
-          loginMethod: users.loginMethod, totpEnabled: users.totpEnabled,
-        }).from(users).where(where).orderBy(desc(users.createdAt)).limit(200);
+        const all = await listUsersRaw();
+        scoped = all.filter(u => u.createdBy === ctx.user.id || u.id === ctx.user.id);
+      } else {
+        return [];
       }
-      return [];
+
+      return scoped
+        .filter(matchesSearch)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 200)
+        .map(project);
     }),
     create: protectedProcedure.input(z.object({
       username: z.string().min(3),
@@ -1467,8 +1607,6 @@ export const appRouter = router({
       mobile: z.string().optional(),
       role: z.enum(["admin", "subadmin", "purchaser", "staff", "sales_rep"]),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { hashPassword, generateLocalOpenId } = await import("./localAuth");
       const currentRole = ctx.user.role;
       // Admin can create subadmin; SubAdmin can create purchaser, staff, sales_rep
@@ -1482,15 +1620,14 @@ export const appRouter = router({
         throw new Error("You do not have permission to create users");
       }
       // Check username uniqueness
-      const existing = await db.select().from(users).where(eq(users.username, input.username)).limit(1);
-      if (existing.length > 0) throw new Error("Username already exists");
+      const existing = await getUserByUsername(input.username);
+      if (existing) throw new Error("Username already exists");
       const passwordHash = await hashPassword(input.password);
       const openId = generateLocalOpenId();
-      await db.insert(users).values({
+      await createUser({
         openId,
         username: input.username,
         passwordHash,
-        passwordPlain: input.password,
         name: input.name,
         email: input.email || null,
         mobile: input.mobile || null,
@@ -1499,73 +1636,59 @@ export const appRouter = router({
         loginMethod: "local",
         createdBy: ctx.user.id,
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create_user", entity: "user", entityId: 0, details: `Created ${input.role} user: ${input.username}` });
+      await fsAudit(ctx.user.id, ctx.user.name, "create_user", "user", 0, `Created ${input.role} user: ${input.username}`);
       return { success: true };
     }),
     updateRole: adminProcedure.input(z.object({ userId: z.number(), role: z.enum(["admin", "subadmin", "purchaser", "staff", "sales_rep"]) })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update_role", entity: "user", entityId: input.userId, details: `Changed role to ${input.role}` });
+      await updateUser(input.userId, { role: input.role });
+      await fsAudit(ctx.user.id, ctx.user.name, "update_role", "user", input.userId, `Changed role to ${input.role}`);
       return { success: true };
     }),
     deactivate: adminProcedure.input(z.object({ userId: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.update(users).set({ status: "inactive" }).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "deactivate_user", entity: "user", entityId: input.userId, details: "Deactivated user" });
+      await updateUser(input.userId, { status: "inactive" });
+      await fsAudit(ctx.user.id, ctx.user.name, "deactivate_user", "user", input.userId, "Deactivated user");
       return { success: true };
     }),
     activate: adminProcedure.input(z.object({ userId: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.update(users).set({ status: "active" }).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "activate_user", entity: "user", entityId: input.userId, details: "Activated user" });
+      await updateUser(input.userId, { status: "active" });
+      await fsAudit(ctx.user.id, ctx.user.name, "activate_user", "user", input.userId, "Activated user");
       return { success: true };
     }),
     delete: adminProcedure.input(z.object({ userId: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       if (input.userId === ctx.user.id) throw new Error("Cannot delete your own account");
-      await db.delete(users).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete_user", entity: "user", entityId: input.userId, details: "Deleted user" });
+      await deleteUser(input.userId);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete_user", "user", input.userId, "Deleted user");
       return { success: true };
     }),
     resetPassword: adminProcedure.input(z.object({ userId: z.number(), newPassword: z.string().min(6) })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { hashPassword } = await import("./localAuth");
       const passwordHash = await hashPassword(input.newPassword);
-      await db.update(users).set({ passwordHash, passwordPlain: input.newPassword }).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "reset_password", entity: "user", entityId: input.userId, details: "Reset user password" });
+      await updateUser(input.userId, { passwordHash });
+      await fsAudit(ctx.user.id, ctx.user.name, "reset_password", "user", input.userId, "Reset user password");
       return { success: true };
     }),
     // Admin: send password reset email to user
     sendResetEmail: adminProcedure.input(z.object({ userId: z.number(), origin: z.string() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [targetUser] = await db.select().from(users).where(eq(users.id, input.userId));
+      const targetUser = await getUserById(input.userId);
       if (!targetUser) throw new Error("User not found");
       if (!targetUser.email) throw new Error("User does not have an email address");
       const { nanoid } = await import("nanoid");
       const resetToken = nanoid(40);
       const resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
-      await db.update(users).set({ resetToken, resetTokenExpiry }).where(eq(users.id, input.userId));
+      await updateUser(input.userId, { resetToken, resetTokenExpiry });
       const resetLink = `${input.origin}/reset-password?token=${resetToken}`;
       const { sendPasswordResetEmail } = await import("./email");
       const sent = await sendPasswordResetEmail(targetUser.email, resetLink, targetUser.name || targetUser.username || "User");
       if (!sent) throw new Error("Failed to send email. Check SMTP configuration.");
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "send_reset_email", entity: "user", entityId: input.userId, details: `Sent password reset email to ${targetUser.email}` });
+      await fsAudit(ctx.user.id, ctx.user.name, "send_reset_email", "user", input.userId, `Sent password reset email to ${targetUser.email}`);
       return { success: true };
     }),
     // Admin: reset 2FA for a user (clears TOTP secret, user must set up again)
     reset2FA: adminProcedure.input(z.object({ userId: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [targetUser] = await db.select().from(users).where(eq(users.id, input.userId));
+      const targetUser = await getUserById(input.userId);
       if (!targetUser) throw new Error("User not found");
-      await db.update(users).set({ totpEnabled: false, totpSecret: null }).where(eq(users.id, input.userId));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "reset_2fa", entity: "user", entityId: input.userId, details: `Reset 2FA for user ${targetUser.username || targetUser.name}` });
+      await updateUser(input.userId, { totpEnabled: false, totpSecret: null });
+      await fsAudit(ctx.user.id, ctx.user.name, "reset_2fa", "user", input.userId, `Reset 2FA for user ${targetUser.username || targetUser.name}`);
       return { success: true };
     }),
     // Admin: update another user's details (username, email, mobile)
@@ -1576,75 +1699,70 @@ export const appRouter = router({
       mobile: z.string().optional(),
       name: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const updateData: Record<string, any> = {};
       if (input.username) {
-        const existing = await db.select().from(users).where(eq(users.username, input.username)).limit(1);
-        if (existing.length > 0 && existing[0].id !== input.userId) throw new Error("Username already taken");
+        const existing = await getUserByUsername(input.username);
+        if (existing && existing.id !== input.userId) throw new Error("Username already taken");
         updateData.username = input.username;
       }
       if (input.email !== undefined) updateData.email = input.email;
       if (input.mobile !== undefined) updateData.mobile = input.mobile;
       if (input.name !== undefined) updateData.name = input.name;
       if (Object.keys(updateData).length > 0) {
-        await db.update(users).set(updateData).where(eq(users.id, input.userId));
-        await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update_user_details", entity: "user", entityId: input.userId, details: `Updated: ${Object.keys(updateData).join(", ")}` });
+        await updateUser(input.userId, updateData);
+        await fsAudit(ctx.user.id, ctx.user.name, "update_user_details", "user", input.userId, `Updated: ${Object.keys(updateData).join(", ")}`);
       }
       return { success: true };
     }),
     // Self-service: change own username
     changeUsername: protectedProcedure.input(z.object({ newUsername: z.string().min(3) })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const existing = await db.select().from(users).where(eq(users.username, input.newUsername)).limit(1);
-      if (existing.length > 0 && existing[0].id !== ctx.user.id) throw new Error("Username already taken");
-      await db.update(users).set({ username: input.newUsername }).where(eq(users.id, ctx.user.id));
+      const existing = await getUserByUsername(input.newUsername);
+      if (existing && existing.id !== ctx.user.id) throw new Error("Username already taken");
+      await updateUser(ctx.user.id, { username: input.newUsername });
       return { success: true };
     }),
     // Self-service: change own password
     changePassword: protectedProcedure.input(z.object({ currentPassword: z.string(), newPassword: z.string().min(6) })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const bcrypt = await import("bcryptjs");
-      const [user] = await db.select().from(users).where(eq(users.id, ctx.user.id));
+      const user = await getUserById(ctx.user.id);
       if (!user || !user.passwordHash) throw new Error("Cannot change password for OAuth accounts");
       const isValid = await bcrypt.compare(input.currentPassword, user.passwordHash);
       if (!isValid) throw new Error("Current password is incorrect");
       const { hashPassword } = await import("./localAuth");
       const passwordHash = await hashPassword(input.newPassword);
-      await db.update(users).set({ passwordHash, passwordPlain: input.newPassword }).where(eq(users.id, ctx.user.id));
+      await updateUser(ctx.user.id, { passwordHash });
       return { success: true };
     }),
     // Self-service: update own profile
     updateProfile: protectedProcedure.input(z.object({ name: z.string().optional(), email: z.string().email().optional(), mobile: z.string().optional() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const updateData: Record<string, any> = {};
       if (input.name !== undefined) updateData.name = input.name;
       if (input.email !== undefined) updateData.email = input.email;
       if (input.mobile !== undefined) updateData.mobile = input.mobile;
       if (Object.keys(updateData).length > 0) {
-        await db.update(users).set(updateData).where(eq(users.id, ctx.user.id));
+        await updateUser(ctx.user.id, updateData);
       }
       return { success: true };
     }),
-    auditLogs: protectedProcedure.input(z.object({ limit: z.number().optional() })).query(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const result = await db.select({
-        id: auditLogs.id,
-        action: auditLogs.action,
-        entity: auditLogs.entity,
-        entityId: auditLogs.entityId,
-        details: auditLogs.details,
-        createdAt: auditLogs.createdAt,
-        userName: users.name,
-      }).from(auditLogs)
-        .leftJoin(users, eq(auditLogs.userId, users.id))
-        .orderBy(desc(auditLogs.createdAt))
-        .limit(input.limit || 50);
-      return result;
+    // NOTE: reads only the Firestore `audit_logs` collection, populated by
+    // this router's own mutations above (server/firestore.ts#audit). Actions
+    // logged by not-yet-migrated routers still land in the MySQL `audit_logs`
+    // table (drizzle) and will NOT show up here until those routers are
+    // migrated too — see server/firestore.ts audit() for the write side.
+    auditLogs: protectedProcedure.input(z.object({ limit: z.number().optional() })).query(async ({ input }) => {
+      const all = await fsListAll<FsAuditLog>("audit_logs");
+      return all
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, input.limit || 50)
+        .map(a => ({
+          id: a.id,
+          action: a.action,
+          entity: a.entity,
+          entityId: a.entityId,
+          details: a.details,
+          createdAt: a.createdAt,
+          userName: a.userName,
+        }));
     }),
   }),
   // ============ PROJECTS ============
@@ -1659,40 +1777,45 @@ export const appRouter = router({
       createdDateFrom: z.string().optional(),
       createdDateTo: z.string().optional(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(
-        like(projects.name, `%${input.search}%`),
-        like(projects.customerName, `%${input.search}%`),
-        like(projects.address, `%${input.search}%`),
-        like(projects.sizeOfSetup, `%${input.search}%`),
-        like(projects.typeOfSetup, `%${input.search}%`),
-        like(projects.description, `%${input.search}%`),
-        like(projects.notes, `%${input.search}%`),
-        sql`DATE_FORMAT(${projects.createdAt}, '%Y-%m-%d') LIKE ${`%${input.search}%`}`,
-        sql`DATE_FORMAT(${projects.createdAt}, '%m/%Y') LIKE ${`%${input.search}%`}`,
-        sql`DATE_FORMAT(${projects.createdAt}, '%Y') LIKE ${`%${input.search}%`}`
-      ));
-      if (input.stage) conditions.push(eq(projects.stage, input.stage as any));
-      if (input.typeOfSetup) conditions.push(eq(projects.typeOfSetup, input.typeOfSetup));
-      if (input.sizeOfSetup) conditions.push(like(projects.sizeOfSetup, `%${input.sizeOfSetup}%`));
-      if (input.startDateFrom) conditions.push(gte(projects.startDate, new Date(input.startDateFrom)));
-      if (input.startDateTo) conditions.push(lte(projects.startDate, new Date(input.startDateTo)));
-      if (input.createdDateFrom) conditions.push(gte(projects.createdAt, new Date(input.createdDateFrom)));
-      if (input.createdDateTo) conditions.push(lte(projects.createdAt, new Date(input.createdDateTo)));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const rows = await db.select().from(projects).where(where).orderBy(desc(projects.createdAt)).limit(200);
+      const [allProjects, allPayments] = await Promise.all([
+        fsListAll<Project>("projects"),
+        fsListAll<ProjectPayment>("project_payments"),
+      ]);
+      let rows = allProjects;
+      if (input.search) {
+        const s = input.search.toLowerCase();
+        rows = rows.filter(r => {
+          if ((r.name || "").toLowerCase().includes(s)) return true;
+          if ((r.customerName || "").toLowerCase().includes(s)) return true;
+          if ((r.address || "").toLowerCase().includes(s)) return true;
+          if ((r.sizeOfSetup || "").toLowerCase().includes(s)) return true;
+          if ((r.typeOfSetup || "").toLowerCase().includes(s)) return true;
+          if ((r.description || "").toLowerCase().includes(s)) return true;
+          if ((r.notes || "").toLowerCase().includes(s)) return true;
+          const d = r.createdAt;
+          const ymd = d.toISOString().slice(0, 10);
+          const my = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const y = String(d.getFullYear());
+          return ymd.includes(s) || my.includes(s) || y.includes(s);
+        });
+      }
+      if (input.stage) rows = rows.filter(r => r.stage === input.stage);
+      if (input.typeOfSetup) rows = rows.filter(r => r.typeOfSetup === input.typeOfSetup);
+      if (input.sizeOfSetup) rows = rows.filter(r => (r.sizeOfSetup || "").toLowerCase().includes(input.sizeOfSetup!.toLowerCase()));
+      if (input.startDateFrom) { const from = new Date(input.startDateFrom).getTime(); rows = rows.filter(r => r.startDate && r.startDate.getTime() >= from); }
+      if (input.startDateTo) { const to = new Date(input.startDateTo).getTime(); rows = rows.filter(r => r.startDate && r.startDate.getTime() <= to); }
+      if (input.createdDateFrom) { const from = new Date(input.createdDateFrom).getTime(); rows = rows.filter(r => r.createdAt.getTime() >= from); }
+      if (input.createdDateTo) { const to = new Date(input.createdDateTo).getTime(); rows = rows.filter(r => r.createdAt.getTime() <= to); }
+      rows = rows.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 200);
+
       // Compute payment status for each project
-      const projectIds = rows.map(r => r.id);
-      let paymentsMap: Record<number, number> = {};
-      if (projectIds.length > 0) {
-        const payments = await db.select({ projectId: projectPayments.projectId, total: sql<string>`COALESCE(SUM(${projectPayments.amount}), 0)` }).from(projectPayments).where(inArray(projectPayments.projectId, projectIds)).groupBy(projectPayments.projectId);
-        for (const p of payments) paymentsMap[p.projectId] = parseFloat(p.total || "0");
+      const paymentsMap = new Map<number, number>();
+      for (const pmt of allPayments) {
+        paymentsMap.set(pmt.projectId, (paymentsMap.get(pmt.projectId) || 0) + Number(pmt.amount));
       }
       return rows.map(r => {
         const totalAmount = parseFloat(r.totalProjectAmount || "0");
-        const totalPaid = paymentsMap[r.id] || 0;
+        const totalPaid = paymentsMap.get(r.id) || 0;
         let paymentStatus = "unpaid";
         if (totalAmount > 0 && totalPaid >= totalAmount) paymentStatus = "fully_paid";
         else if (totalPaid > 0) paymentStatus = "partially_paid";
@@ -1700,10 +1823,7 @@ export const appRouter = router({
       });
     }),
     getById: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const result = await db.select().from(projects).where(eq(projects.id, input.id)).limit(1);
-      return result[0] || null;
+      return (await fsGetById<Project>("projects", input.id)) || null;
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1),
@@ -1721,26 +1841,36 @@ export const appRouter = router({
       notes: z.string().optional(),
       totalProjectAmount: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const insertData: any = {
-        ...input,
-        stage: (input.stage || "procurement") as any,
+      const stage = input.stage || "procurement";
+      const id = await fsInsertOne("projects", {
+        name: input.name,
+        description: input.description ?? null,
+        sizeOfSetup: input.sizeOfSetup ?? null,
+        typeOfSetup: input.typeOfSetup ?? null,
+        customerName: input.customerName ?? null,
+        address: input.address ?? null,
+        stage,
         startDate: input.startDate ? new Date(input.startDate) : null,
         targetCompletionDate: input.targetCompletionDate ? new Date(input.targetCompletionDate) : null,
+        completedDate: null,
+        opportunityId: input.opportunityId ?? null,
+        quotationId: input.quotationId ?? null,
+        contactId: input.contactId ?? null,
+        totalProjectAmount: input.totalProjectAmount ?? null,
+        notes: input.notes ?? null,
         createdBy: ctx.user.id,
-      };
-      const [result] = await db.insert(projects).values(insertData).$returningId();
+      });
       // Record initial status
-      await db.insert(projectStatusHistory).values({
-        projectId: result.id,
-        toStage: input.stage || "procurement",
+      await fsInsertOne("project_status_history", {
+        projectId: id,
+        fromStage: null,
+        toStage: stage,
         notes: "Project created",
         changedBy: ctx.user.id,
         changedByName: ctx.user.name || "Unknown",
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "project", entityId: result.id, details: `Created project: ${input.name}` });
-      return { success: true, id: result.id };
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "project", id, `Created project: ${input.name}`);
+      return { success: true, id };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
@@ -1758,16 +1888,14 @@ export const appRouter = router({
       notes: z.string().optional(),
       totalProjectAmount: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      const updateData: any = {
+      const updateData: Record<string, unknown> = {
         ...data,
         startDate: data.startDate ? new Date(data.startDate) : null,
         targetCompletionDate: data.targetCompletionDate ? new Date(data.targetCompletionDate) : null,
       };
-      await db.update(projects).set(updateData).where(eq(projects.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "project", entityId: id, details: `Updated project: ${input.name}` });
+      await fsUpdateOne("projects", id, updateData);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "project", id, `Updated project: ${input.name}`);
       return { success: true };
     }),
     updateStage: protectedProcedure.input(z.object({
@@ -1775,17 +1903,15 @@ export const appRouter = router({
       stage: z.string(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       // Get current stage
-      const [current] = await db.select({ stage: projects.stage }).from(projects).where(eq(projects.id, input.id));
+      const current = await fsGetById<Project>("projects", input.id);
       const fromStage = current?.stage || null;
       // Update project stage
-      const updateData: any = { stage: input.stage as any };
+      const updateData: Record<string, unknown> = { stage: input.stage };
       if (input.stage === "completed") updateData.completedDate = new Date();
-      await db.update(projects).set(updateData).where(eq(projects.id, input.id));
+      await fsUpdateOne("projects", input.id, updateData);
       // Record status change
-      await db.insert(projectStatusHistory).values({
+      await fsInsertOne("project_status_history", {
         projectId: input.id,
         fromStage,
         toStage: input.stage,
@@ -1793,44 +1919,43 @@ export const appRouter = router({
         changedBy: ctx.user.id,
         changedByName: ctx.user.name || "Unknown",
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update_stage", entity: "project", entityId: input.id, details: `Stage: ${fromStage} → ${input.stage}` });
+      await fsAudit(ctx.user.id, ctx.user.name, "update_stage", "project", input.id, `Stage: ${fromStage} → ${input.stage}`);
       return { success: true };
     }),
     getHistory: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(projectStatusHistory).where(eq(projectStatusHistory.projectId, input.projectId)).orderBy(desc(projectStatusHistory.createdAt));
+      const rows = await fsListAll<ProjectStatusHistory>("project_status_history", { where: [["projectId", "==", input.projectId]] });
+      return rows.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(projectStatusHistory).where(eq(projectStatusHistory.projectId, input.id));
-      await db.delete(projects).where(eq(projects.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "project", entityId: input.id, details: `Deleted project #${input.id}` });
+      const history = await fsListAll<ProjectStatusHistory>("project_status_history", { where: [["projectId", "==", input.id]] });
+      await Promise.all(history.map(h => fsDeleteOne("project_status_history", h.id)));
+      await fsDeleteOne("projects", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "project", input.id, `Deleted project #${input.id}`);
       return { success: true };
     }),
     stats: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return { total: 0, procurement: 0, implementation: 0, ongoing: 0, completed: 0 };
-      const [total] = await db.select({ c: count() }).from(projects);
-      const [procurement] = await db.select({ c: count() }).from(projects).where(eq(projects.stage, "procurement"));
-      const [implementation] = await db.select({ c: count() }).from(projects).where(eq(projects.stage, "implementation"));
-      const [ongoing] = await db.select({ c: count() }).from(projects).where(eq(projects.stage, "ongoing"));
-      const [completed] = await db.select({ c: count() }).from(projects).where(eq(projects.stage, "completed"));
-      return { total: total.c, procurement: procurement.c, implementation: implementation.c, ongoing: ongoing.c, completed: completed.c };
+      const rows = await fsListAll<Project>("projects", { select: ["stage"] });
+      const counts = { total: rows.length, procurement: 0, implementation: 0, ongoing: 0, completed: 0 };
+      for (const r of rows) {
+        if (r.stage === "procurement") counts.procurement++;
+        else if (r.stage === "implementation") counts.implementation++;
+        else if (r.stage === "ongoing") counts.ongoing++;
+        else if (r.stage === "completed") counts.completed++;
+      }
+      return counts;
     }),
     // --- Project Payments ---
     getPayments: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const payments = await db.select().from(projectPayments).where(eq(projectPayments.projectId, input.projectId)).orderBy(desc(projectPayments.paymentDate));
-      // Attach lastAckId for re-print capability
-      const paymentIds = payments.map(p => p.id);
-      if (paymentIds.length === 0) return payments;
-      const acks = await db.select().from(acknowledgementReceipts).where(and(eq(acknowledgementReceipts.type, "project_payment"), inArray(acknowledgementReceipts.referenceId, paymentIds)));
+      const [payments, acks] = await Promise.all([
+        fsListAll<ProjectPayment>("project_payments", { where: [["projectId", "==", input.projectId]] }),
+        fsListAll<AcknowledgementReceipt>("acknowledgement_receipts", { where: [["type", "==", "project_payment"]] }),
+      ]);
       const ackMap = new Map<number, number>();
       acks.forEach(a => { if (!ackMap.has(a.referenceId) || a.id > ackMap.get(a.referenceId)!) ackMap.set(a.referenceId, a.id); });
-      return payments.map(p => ({ ...p, lastAckId: ackMap.get(p.id) || null }));
+      return payments
+        .slice()
+        .sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())
+        .map(p => ({ ...p, lastAckId: ackMap.get(p.id) || null }));
     }),
     addPayment: protectedProcedure.input(z.object({
       projectId: z.number(),
@@ -1840,9 +1965,7 @@ export const appRouter = router({
       paymentReference: z.string().optional(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.insert(projectPayments).values({
+      await fsInsertOne("project_payments", {
         projectId: input.projectId,
         paymentDate: new Date(input.paymentDate),
         amount: input.amount,
@@ -1852,23 +1975,21 @@ export const appRouter = router({
         createdBy: ctx.user.id,
         createdByName: ctx.user.name || "Unknown",
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "project_payment", entityId: input.projectId, details: `Payment of ${input.amount} for project #${input.projectId}` });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "project_payment", input.projectId, `Payment of ${input.amount} for project #${input.projectId}`);
       return { success: true };
     }),
     deletePayment: protectedProcedure.input(z.object({ id: z.number(), projectId: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(projectPayments).where(eq(projectPayments.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "project_payment", entityId: input.id, details: `Deleted payment for project #${input.projectId}` });
+      await fsDeleteOne("project_payments", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "project_payment", input.id, `Deleted payment for project #${input.projectId}`);
       return { success: true };
     }),
     paymentSummary: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { totalPaid: 0, totalProjectAmount: 0, balance: 0, status: "unpaid" as const };
-      const [project] = await db.select().from(projects).where(eq(projects.id, input.projectId)).limit(1);
+      const [project, payments] = await Promise.all([
+        fsGetById<Project>("projects", input.projectId),
+        fsListAll<ProjectPayment>("project_payments", { where: [["projectId", "==", input.projectId]] }),
+      ]);
       const totalProjectAmount = Number(project?.totalProjectAmount || 0);
-      const [paidResult] = await db.select({ total: sum(projectPayments.amount) }).from(projectPayments).where(eq(projectPayments.projectId, input.projectId));
-      const totalPaid = Number(paidResult?.total || 0);
+      const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
       const balance = totalProjectAmount - totalPaid;
       let status: "unpaid" | "partially_paid" | "fully_paid" = "unpaid";
       if (totalPaid >= totalProjectAmount && totalProjectAmount > 0) status = "fully_paid";
@@ -1882,19 +2003,26 @@ export const appRouter = router({
       dateFrom: z.string().optional(),
       dateTo: z.string().optional(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      // Get all projects with their payment totals
-      const allProjects = await db.select().from(projects).orderBy(desc(projects.createdAt));
+      const [allProjects, allPayments] = await Promise.all([
+        fsListAll<Project>("projects"),
+        fsListAll<ProjectPayment>("project_payments"),
+      ]);
+      const paymentsByProject = new Map<number, ProjectPayment[]>();
+      for (const pmt of allPayments) {
+        const arr = paymentsByProject.get(pmt.projectId) ?? [];
+        arr.push(pmt);
+        paymentsByProject.set(pmt.projectId, arr);
+      }
+      const sortedProjects = allProjects.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       const results = [];
-      for (const project of allProjects) {
+      for (const project of sortedProjects) {
         // Search filter
         if (input.search) {
           const s = input.search.toLowerCase();
           if (!project.name.toLowerCase().includes(s) && !(project.customerName || "").toLowerCase().includes(s) && !(project.address || "").toLowerCase().includes(s) && !(project.typeOfSetup || "").toLowerCase().includes(s) && !(project.sizeOfSetup || "").toLowerCase().includes(s)) continue;
         }
-        const [paidResult] = await db.select({ total: sum(projectPayments.amount) }).from(projectPayments).where(eq(projectPayments.projectId, project.id));
-        const totalPaid = Number(paidResult?.total || 0);
+        const payments = paymentsByProject.get(project.id) ?? [];
+        const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
         const totalProjectAmount = Number(project.totalProjectAmount || 0);
         const balance = totalProjectAmount - totalPaid;
         let status: "unpaid" | "partially_paid" | "fully_paid" = "unpaid";
@@ -1903,10 +2031,10 @@ export const appRouter = router({
         // Status filter
         if (input.paymentStatus !== "all" && status !== input.paymentStatus) continue;
         // Get last payment date
-        const [lastPayment] = await db.select({ date: projectPayments.paymentDate }).from(projectPayments).where(eq(projectPayments.projectId, project.id)).orderBy(desc(projectPayments.paymentDate)).limit(1);
+        const lastPayment = payments.length > 0 ? payments.slice().sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())[0] : null;
         // Date filter on last payment
-        if (input.dateFrom && lastPayment?.date && new Date(lastPayment.date) < new Date(input.dateFrom)) continue;
-        if (input.dateTo && lastPayment?.date && new Date(lastPayment.date) > new Date(input.dateTo)) continue;
+        if (input.dateFrom && lastPayment && lastPayment.paymentDate.getTime() < new Date(input.dateFrom).getTime()) continue;
+        if (input.dateTo && lastPayment && lastPayment.paymentDate.getTime() > new Date(input.dateTo).getTime()) continue;
         results.push({
           projectId: project.id,
           projectName: project.name,
@@ -1915,23 +2043,25 @@ export const appRouter = router({
           totalPaid,
           balance,
           status,
-          lastPaymentDate: lastPayment?.date || null,
+          lastPaymentDate: lastPayment?.paymentDate || null,
           stage: project.stage,
         });
       }
       return results;
     }),
     paymentAnalytics: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return { totalReceivables: 0, unpaidCount: 0, partiallyPaidCount: 0, fullyPaidCount: 0, monthlyPayments: [] as { month: string; amount: number }[] };
-      const allProjects = await db.select().from(projects);
+      const [allProjects, allPayments] = await Promise.all([
+        fsListAll<Project>("projects"),
+        fsListAll<ProjectPayment>("project_payments"),
+      ]);
+      const paidByProject = new Map<number, number>();
+      for (const pmt of allPayments) paidByProject.set(pmt.projectId, (paidByProject.get(pmt.projectId) || 0) + Number(pmt.amount || 0));
       let totalReceivables = 0;
       let unpaidCount = 0;
       let partiallyPaidCount = 0;
       let fullyPaidCount = 0;
       for (const project of allProjects) {
-        const [paidResult] = await db.select({ total: sum(projectPayments.amount) }).from(projectPayments).where(eq(projectPayments.projectId, project.id));
-        const totalPaid = Number(paidResult?.total || 0);
+        const totalPaid = paidByProject.get(project.id) || 0;
         const totalProjectAmount = Number(project.totalProjectAmount || 0);
         const balance = totalProjectAmount - totalPaid;
         if (totalPaid >= totalProjectAmount && totalProjectAmount > 0) fullyPaidCount++;
@@ -1939,10 +2069,9 @@ export const appRouter = router({
         else { unpaidCount++; totalReceivables += totalProjectAmount; }
       }
       // Monthly payments (last 12 months)
-      const allPayments = await db.select().from(projectPayments).orderBy(desc(projectPayments.paymentDate));
       const monthlyMap: Record<string, number> = {};
       for (const p of allPayments) {
-        const d = new Date(p.paymentDate);
+        const d = p.paymentDate;
         const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
         monthlyMap[key] = (monthlyMap[key] || 0) + Number(p.amount);
       }
@@ -1959,40 +2088,37 @@ export const appRouter = router({
       sizeOfSetup: z.string().optional(),
       electricCompany: z.string().optional(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(
-        like(netMetering.clientName, `%${input.search}%`),
-        like(netMetering.address, `%${input.search}%`),
-        like(netMetering.projectName, `%${input.search}%`),
-        like(netMetering.electricCompany, `%${input.search}%`),
-        like(netMetering.applicationNumber, `%${input.search}%`),
-        like(netMetering.sizeOfSetup, `%${input.search}%`),
-        like(netMetering.typeOfSetup, `%${input.search}%`),
-        like(netMetering.notes, `%${input.search}%`),
-        sql`DATE_FORMAT(${netMetering.createdAt}, '%Y-%m-%d') LIKE ${`%${input.search}%`}`,
-        sql`DATE_FORMAT(${netMetering.createdAt}, '%m/%Y') LIKE ${`%${input.search}%`}`,
-        sql`DATE_FORMAT(${netMetering.createdAt}, '%Y') LIKE ${`%${input.search}%`}`
-      ));
-      if (input.status) conditions.push(eq(netMetering.status, input.status as any));
-      if (input.typeOfSetup) conditions.push(eq(netMetering.typeOfSetup, input.typeOfSetup));
-      if (input.sizeOfSetup) conditions.push(like(netMetering.sizeOfSetup, `%${input.sizeOfSetup}%`));
-      if (input.electricCompany) conditions.push(like(netMetering.electricCompany, `%${input.electricCompany}%`));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(netMetering).where(where).orderBy(desc(netMetering.createdAt)).limit(200);
+      let rows = await fsListAll<NetMetering>("net_metering");
+      if (input.search) {
+        const s = input.search.toLowerCase();
+        rows = rows.filter(r => {
+          if ((r.clientName || "").toLowerCase().includes(s)) return true;
+          if ((r.address || "").toLowerCase().includes(s)) return true;
+          if ((r.projectName || "").toLowerCase().includes(s)) return true;
+          if ((r.electricCompany || "").toLowerCase().includes(s)) return true;
+          if ((r.applicationNumber || "").toLowerCase().includes(s)) return true;
+          if ((r.sizeOfSetup || "").toLowerCase().includes(s)) return true;
+          if ((r.typeOfSetup || "").toLowerCase().includes(s)) return true;
+          if ((r.notes || "").toLowerCase().includes(s)) return true;
+          const d = r.createdAt;
+          const ymd = d.toISOString().slice(0, 10);
+          const my = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const y = String(d.getFullYear());
+          return ymd.includes(s) || my.includes(s) || y.includes(s);
+        });
+      }
+      if (input.status) rows = rows.filter(r => r.status === input.status);
+      if (input.typeOfSetup) rows = rows.filter(r => r.typeOfSetup === input.typeOfSetup);
+      if (input.sizeOfSetup) rows = rows.filter(r => (r.sizeOfSetup || "").toLowerCase().includes(input.sizeOfSetup!.toLowerCase()));
+      if (input.electricCompany) rows = rows.filter(r => (r.electricCompany || "").toLowerCase().includes(input.electricCompany!.toLowerCase()));
+      return rows.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 200);
     }),
     getById: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const result = await db.select().from(netMetering).where(eq(netMetering.id, input.id)).limit(1);
-      return result[0] || null;
+      return (await fsGetById<NetMetering>("net_metering", input.id)) || null;
     }),
     getByProjectId: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const result = await db.select().from(netMetering).where(eq(netMetering.projectId, input.projectId)).limit(1);
-      return result[0] || null;
+      const rows = await fsListAll<NetMetering>("net_metering", { where: [["projectId", "==", input.projectId]] });
+      return rows[0] || null;
     }),
     create: protectedProcedure.input(z.object({
       projectId: z.number().optional(),
@@ -2007,17 +2133,24 @@ export const appRouter = router({
       notes: z.string().optional(),
       submittedDate: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const insertData: any = {
-        ...input,
-        status: (input.status || "plan_drawings") as any,
+      const id = await fsInsertOne("net_metering", {
+        projectId: input.projectId ?? null,
+        clientName: input.clientName,
+        projectName: input.projectName ?? null,
+        address: input.address ?? null,
+        sizeOfSetup: input.sizeOfSetup ?? null,
+        typeOfSetup: input.typeOfSetup ?? null,
+        status: input.status || "plan_drawings",
+        electricCompany: input.electricCompany ?? null,
+        applicationNumber: input.applicationNumber ?? null,
+        notes: input.notes ?? null,
         submittedDate: input.submittedDate ? new Date(input.submittedDate) : null,
+        approvedDate: null,
+        completedDate: null,
         createdBy: ctx.user.id,
-      };
-      const [result] = await db.insert(netMetering).values(insertData).$returningId();
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "net_metering", entityId: result.id, details: `Created net metering for: ${input.clientName}` });
-      return { id: result.id };
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "net_metering", id, `Created net metering for: ${input.clientName}`);
+      return { id };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
@@ -2034,126 +2167,159 @@ export const appRouter = router({
       approvedDate: z.string().optional(),
       completedDate: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      const updateData: any = {
+      const updateData: Record<string, unknown> = {
         ...data,
-        status: data.status as any,
         submittedDate: data.submittedDate ? new Date(data.submittedDate) : null,
         approvedDate: data.approvedDate ? new Date(data.approvedDate) : null,
         completedDate: data.completedDate ? new Date(data.completedDate) : null,
       };
-      await db.update(netMetering).set(updateData).where(eq(netMetering.id, id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "update", entity: "net_metering", entityId: id, details: `Updated net metering for: ${input.clientName}` });
+      await fsUpdateOne("net_metering", id, updateData);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "net_metering", id, `Updated net metering for: ${input.clientName}`);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(netMetering).where(eq(netMetering.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "delete", entity: "net_metering", entityId: input.id, details: "Deleted net metering record" });
+      await fsDeleteOne("net_metering", input.id);
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "net_metering", input.id, "Deleted net metering record");
       return { success: true };
     }),
     stats: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return { total: 0, planDrawings: 0, submitted: 0, approved: 0, completed: 0 };
-      const [total] = await db.select({ c: count() }).from(netMetering);
-      const [planDrawings] = await db.select({ c: count() }).from(netMetering).where(eq(netMetering.status, "plan_drawings"));
-      const [submitted] = await db.select({ c: count() }).from(netMetering).where(or(
-        eq(netMetering.status, "submitted_lgu"),
-        eq(netMetering.status, "submitted_fire"),
-        eq(netMetering.status, "submitted_electric")
-      ));
-      const [approved] = await db.select({ c: count() }).from(netMetering).where(eq(netMetering.status, "approved"));
-      const [completed] = await db.select({ c: count() }).from(netMetering).where(eq(netMetering.status, "completed_energized"));
-      return { total: total.c, planDrawings: planDrawings.c, submitted: submitted.c, approved: approved.c, completed: completed.c };
+      const rows = await fsListAll<NetMetering>("net_metering", { select: ["status"] });
+      const counts = { total: rows.length, planDrawings: 0, submitted: 0, approved: 0, completed: 0 };
+      for (const r of rows) {
+        if (r.status === "plan_drawings") counts.planDrawings++;
+        else if (r.status === "submitted_lgu" || r.status === "submitted_fire" || r.status === "submitted_electric") counts.submitted++;
+        else if (r.status === "approved") counts.approved++;
+        else if (r.status === "completed_energized") counts.completed++;
+      }
+      return counts;
     }),
   }),
 
   // ============ STOCK ADJUSTMENTS (Admin-only approval) ============
   stockAdjustments: router({
     list: protectedProcedure.input(z.object({ status: z.string().optional() })).query(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.status) conditions.push(eq(stockAdjustments.status, input.status as any));
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.status) filters.push(["status", "==", input.status]);
       // Sub-admins only see their own requests
-      if (ctx.user.role !== 'admin') conditions.push(eq(stockAdjustments.requestedBy, ctx.user.id));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const result = await db.select({
-        id: stockAdjustments.id, itemId: stockAdjustments.itemId,
-        previousQuantity: stockAdjustments.previousQuantity, newQuantity: stockAdjustments.newQuantity,
-        adjustmentQuantity: stockAdjustments.adjustmentQuantity, reason: stockAdjustments.reason,
-        status: stockAdjustments.status, requestedBy: stockAdjustments.requestedBy,
-        requestedByName: stockAdjustments.requestedByName,
-        approvedBy: stockAdjustments.approvedBy, approvedByName: stockAdjustments.approvedByName,
-        approvedAt: stockAdjustments.approvedAt, notes: stockAdjustments.notes,
-        createdAt: stockAdjustments.createdAt, itemName: inventoryItems.name, itemSku: inventoryItems.sku,
-      }).from(stockAdjustments)
-        .leftJoin(inventoryItems, eq(stockAdjustments.itemId, inventoryItems.id))
-        .where(where).orderBy(desc(stockAdjustments.createdAt)).limit(200);
-      return result;
+      if (ctx.user.role !== 'admin') filters.push(["requestedBy", "==", ctx.user.id]);
+      const [adjustments, items] = await Promise.all([
+        fsListAll<StockAdjustment>("stock_adjustments", { where: filters }),
+        fsListAll<InventoryItem>("inventory_items"),
+      ]);
+      const itemMap = new Map(items.map(i => [i.id, i]));
+      return adjustments
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, 200)
+        .map(a => ({
+          ...a,
+          itemName: itemMap.get(a.itemId)?.name ?? null,
+          itemSku: itemMap.get(a.itemId)?.sku ?? null,
+        }));
     }),
     // Sub-admin can request an adjustment
     request: protectedProcedure.input(z.object({
       itemId: z.number(), newQuantity: z.number().min(0), reason: z.string().min(1), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [item] = await db.select({ stockOnHand: inventoryItems.stockOnHand }).from(inventoryItems).where(eq(inventoryItems.id, input.itemId));
-      const prevQty = item?.stockOnHand ?? 0;
-      await db.insert(stockAdjustments).values({
-        itemId: input.itemId, previousQuantity: prevQty, newQuantity: input.newQuantity,
-        adjustmentQuantity: input.newQuantity - prevQty, reason: input.reason,
-        status: ctx.user.role === 'admin' ? 'approved' : 'pending',
-        requestedBy: ctx.user.id, requestedByName: ctx.user.name || 'Unknown',
-        ...(ctx.user.role === 'admin' ? { approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin', approvedAt: new Date() } : {}),
-        notes: input.notes || null,
-      });
-      // If admin, apply immediately
-      if (ctx.user.role === 'admin') {
-        await db.update(inventoryItems).set({ stockOnHand: input.newQuantity }).where(eq(inventoryItems.id, input.itemId));
-        const [itemInfo] = await db.select({ name: inventoryItems.name, sku: inventoryItems.sku }).from(inventoryItems).where(eq(inventoryItems.id, input.itemId));
-        await db.insert(inventoryAuditLog).values({
-          itemId: input.itemId, itemName: itemInfo?.name || null, itemSku: itemInfo?.sku || null,
+      if (ctx.user.role !== 'admin') {
+        // Non-admin: just record a pending request, no stock mutation.
+        const item = await fsGetById<InventoryItem>("inventory_items", input.itemId);
+        const prevQty = item?.stockOnHand ?? 0;
+        await fsInsertOne("stock_adjustments", {
+          itemId: input.itemId, previousQuantity: prevQty, newQuantity: input.newQuantity,
+          adjustmentQuantity: input.newQuantity - prevQty, reason: input.reason,
+          status: 'pending',
+          requestedBy: ctx.user.id, requestedByName: ctx.user.name || 'Unknown',
+          approvedBy: null, approvedByName: null, approvedAt: null,
+          notes: input.notes || null,
+        });
+        await fsAudit(ctx.user.id, ctx.user.name, "create", "stock_adjustment", input.itemId, `Requested adjustment for item #${input.itemId}: ${prevQty} → ${input.newQuantity} (${input.reason})`);
+        return { success: true };
+      }
+
+      // Admin: apply immediately - read-modify-write the item + adjustment row + audit row atomically.
+      const adjId = await fsAllocateIds("stock_adjustments");
+      const auditId = await fsAllocateIds("inventory_audit_log");
+      const now = new Date();
+
+      const { prevQty } = await fdb().runTransaction(async (tx) => {
+        const itemRef = fdb().collection("inventory_items").doc(String(input.itemId));
+        const snap = await tx.get(itemRef);
+        const item = snap.exists ? (snap.data() as InventoryItem | undefined) : undefined;
+        const prevQty = item?.stockOnHand ?? 0;
+
+        tx.set(fdb().collection("stock_adjustments").doc(String(adjId)), {
+          id: adjId,
+          itemId: input.itemId, previousQuantity: prevQty, newQuantity: input.newQuantity,
+          adjustmentQuantity: input.newQuantity - prevQty, reason: input.reason,
+          status: 'approved',
+          requestedBy: ctx.user.id, requestedByName: ctx.user.name || 'Unknown',
+          approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin', approvedAt: now,
+          notes: input.notes || null,
+          createdAt: now, updatedAt: now,
+        });
+        tx.set(itemRef, { stockOnHand: input.newQuantity, updatedAt: now }, { merge: true });
+        tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+          id: auditId,
+          itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
           transactionType: 'adjustment', quantity: input.newQuantity - prevQty,
           previousStock: prevQty, newStock: input.newQuantity,
+          sourceLocation: null, destinationLocation: null,
           reference: `Stock Adjustment`, purpose: input.reason, notes: input.notes || null,
           performedBy: ctx.user.id, performedByName: ctx.user.name || 'Admin',
+          createdAt: now,
         });
-      }
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "create", entity: "stock_adjustment", details: `${ctx.user.role === 'admin' ? 'Applied' : 'Requested'} adjustment for item #${input.itemId}: ${prevQty} → ${input.newQuantity} (${input.reason})` });
+
+        return { prevQty };
+      });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "stock_adjustment", input.itemId, `Applied adjustment for item #${input.itemId}: ${prevQty} → ${input.newQuantity} (${input.reason})`);
       return { success: true };
     }),
     // Admin approve
     approve: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [adj] = await db.select().from(stockAdjustments).where(eq(stockAdjustments.id, input.id));
-      if (!adj || adj.status !== 'pending') throw new Error("Adjustment not found or already processed");
-      await db.update(stockAdjustments).set({ status: 'approved', approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin', approvedAt: new Date() }).where(eq(stockAdjustments.id, input.id));
-      // Apply the adjustment
-      await db.update(inventoryItems).set({ stockOnHand: adj.newQuantity }).where(eq(inventoryItems.id, adj.itemId));
-      const [itemInfo] = await db.select({ name: inventoryItems.name, sku: inventoryItems.sku }).from(inventoryItems).where(eq(inventoryItems.id, adj.itemId));
-      await db.insert(inventoryAuditLog).values({
-        itemId: adj.itemId, itemName: itemInfo?.name || null, itemSku: itemInfo?.sku || null,
-        transactionType: 'adjustment', quantity: adj.adjustmentQuantity,
-        previousStock: adj.previousQuantity, newStock: adj.newQuantity,
-        reference: `Stock Adjustment #${adj.id} (approved)`, purpose: adj.reason || 'Adjustment', notes: adj.notes || null,
-        performedBy: ctx.user.id, performedByName: ctx.user.name || 'Admin',
+      const auditId = await fsAllocateIds("inventory_audit_log");
+      const now = new Date();
+
+      const adj = await fdb().runTransaction(async (tx) => {
+        const adjRef = fdb().collection("stock_adjustments").doc(String(input.id));
+        const adjSnap = await tx.get(adjRef);
+        if (!adjSnap.exists) throw new Error("Adjustment not found or already processed");
+        const adjData = fsDocToData<StockAdjustment>(adjSnap);
+        if (adjData.status !== 'pending') throw new Error("Adjustment not found or already processed");
+
+        const itemRef = fdb().collection("inventory_items").doc(String(adjData.itemId));
+        const itemSnap = await tx.get(itemRef);
+        const item = itemSnap.exists ? (itemSnap.data() as InventoryItem | undefined) : undefined;
+
+        tx.set(adjRef, { status: 'approved', approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin', approvedAt: now }, { merge: true });
+        tx.set(itemRef, { stockOnHand: adjData.newQuantity, updatedAt: now }, { merge: true });
+        tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+          id: auditId,
+          itemId: adjData.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
+          transactionType: 'adjustment', quantity: adjData.adjustmentQuantity,
+          previousStock: adjData.previousQuantity, newStock: adjData.newQuantity,
+          sourceLocation: null, destinationLocation: null,
+          reference: `Stock Adjustment #${adjData.id} (approved)`, purpose: adjData.reason || 'Adjustment', notes: adjData.notes || null,
+          performedBy: ctx.user.id, performedByName: ctx.user.name || 'Admin',
+          createdAt: now,
+        });
+
+        return adjData;
       });
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "approve", entity: "stock_adjustment", entityId: input.id, details: `Approved adjustment #${input.id}: ${adj.previousQuantity} → ${adj.newQuantity}` });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "stock_adjustment", input.id, `Approved adjustment #${input.id}: ${adj.previousQuantity} → ${adj.newQuantity}`);
       return { success: true };
     }),
     // Admin reject
     reject: adminProcedure.input(z.object({ id: z.number(), notes: z.string().optional() })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [adj] = await db.select().from(stockAdjustments).where(eq(stockAdjustments.id, input.id));
+      const adj = await fsGetById<StockAdjustment>("stock_adjustments", input.id);
       if (!adj || adj.status !== 'pending') throw new Error("Adjustment not found or already processed");
-      await db.update(stockAdjustments).set({ status: 'rejected', approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin', approvedAt: new Date(), notes: input.notes || adj.notes }).where(eq(stockAdjustments.id, input.id));
-      await db.insert(auditLogs).values({ userId: ctx.user.id, action: "reject", entity: "stock_adjustment", entityId: input.id, details: `Rejected adjustment #${input.id}` });
+      await fsUpdateOne("stock_adjustments", input.id, {
+        status: 'rejected', approvedBy: ctx.user.id, approvedByName: ctx.user.name || 'Admin',
+        approvedAt: new Date(), notes: input.notes || adj.notes,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "stock_adjustment", input.id, `Rejected adjustment #${input.id}`);
       return { success: true };
     }),
   }),
@@ -2165,35 +2331,49 @@ export const appRouter = router({
       itemId: z.number().optional(), limit: z.number().optional(),
       fromDate: z.number().optional(), toDate: z.number().optional(),
     })).query(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const conditions = [];
-      if (input.search) conditions.push(or(like(inventoryAuditLog.itemName, `%${input.search}%`), like(inventoryAuditLog.itemSku, `%${input.search}%`), like(inventoryAuditLog.performedByName, `%${input.search}%`), like(inventoryAuditLog.reference, `%${input.search}%`), like(inventoryAuditLog.purpose, `%${input.search}%`)));
-      if (input.transactionType) conditions.push(eq(inventoryAuditLog.transactionType, input.transactionType as any));
-      if (input.itemId) conditions.push(eq(inventoryAuditLog.itemId, input.itemId));
-      if (input.fromDate) conditions.push(gte(inventoryAuditLog.createdAt, new Date(input.fromDate)));
-      if (input.toDate) conditions.push(lte(inventoryAuditLog.createdAt, new Date(input.toDate)));
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (input.transactionType) filters.push(["transactionType", "==", input.transactionType]);
+      if (input.itemId) filters.push(["itemId", "==", input.itemId]);
       // Admin and Sub-Admin can see all audit logs; lower roles see only their own
       if (ctx.user.role !== 'admin' && ctx.user.role !== 'subadmin') {
-        conditions.push(eq(inventoryAuditLog.performedBy, ctx.user.id));
+        filters.push(["performedBy", "==", ctx.user.id]);
       }
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      return db.select().from(inventoryAuditLog).where(where).orderBy(desc(inventoryAuditLog.createdAt)).limit(input.limit || 500);
+
+      let rows = await fsListAll<InventoryAuditLog>("inventory_audit_log", { where: filters });
+
+      if (input.fromDate) {
+        const from = new Date(input.fromDate).getTime();
+        rows = rows.filter(r => r.createdAt.getTime() >= from);
+      }
+      if (input.toDate) {
+        const to = new Date(input.toDate).getTime();
+        rows = rows.filter(r => r.createdAt.getTime() <= to);
+      }
+      const search = input.search?.trim().toLowerCase();
+      if (search) {
+        rows = rows.filter(r =>
+          (r.itemName || "").toLowerCase().includes(search) ||
+          (r.itemSku || "").toLowerCase().includes(search) ||
+          (r.performedByName || "").toLowerCase().includes(search) ||
+          (r.reference || "").toLowerCase().includes(search) ||
+          (r.purpose || "").toLowerCase().includes(search)
+        );
+      }
+
+      return rows
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+        .slice(0, input.limit || 500);
     }),
   }),
 
   // ============ SPECIAL QUOTATION TEMPLATES ============
   specialQuotationTemplates: router({
     list: protectedProcedure.query(async () => {
-      const db = await getDb();
-      if (!db) return [];
-      return db.select().from(specialQuotationTemplates).where(eq(specialQuotationTemplates.isActive, 1)).orderBy(desc(specialQuotationTemplates.updatedAt));
+      const rows = await fsListAll<SpecialQuotationTemplate>("special_quotation_templates", { where: [["isActive", "==", 1]] });
+      return rows.slice().sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const [t] = await db.select().from(specialQuotationTemplates).where(eq(specialQuotationTemplates.id, input.id)).limit(1);
-      return t || null;
+      return (await fsGetById<SpecialQuotationTemplate>("special_quotation_templates", input.id)) || null;
     }),
     create: adminProcedure.input(z.object({
       name: z.string().min(1),
@@ -2214,16 +2394,28 @@ export const appRouter = router({
       preparedBy: z.string().optional(),
       contactInfo: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      const [inserted] = await db.insert(specialQuotationTemplates).values({
-        ...input,
+      const id = await fsInsertOne("special_quotation_templates", {
+        name: input.name,
+        description: input.description ?? null,
+        systemTitle: input.systemTitle ?? null,
+        systemDescription: input.systemDescription ?? null,
+        kwRating: input.kwRating ?? null,
+        setupType: input.setupType ?? null,
+        items: input.items ?? null,
         subtotal: input.subtotal || null,
         vatRate: input.vatRate || null,
         discount: input.discount || null,
+        remarks: input.remarks ?? null,
+        warrantyClaims: input.warrantyClaims ?? null,
+        paymentTerms: input.paymentTerms ?? null,
+        paymentDetails: input.paymentDetails ?? null,
+        deliveryTerms: input.deliveryTerms ?? null,
+        preparedBy: input.preparedBy ?? null,
+        contactInfo: input.contactInfo ?? null,
+        isActive: 1,
         createdBy: ctx.user.id,
-      }).$returningId();
-      return { success: true, id: inserted.id };
+      });
+      return { success: true, id };
     }),
     update: adminProcedure.input(z.object({
       id: z.number(),
@@ -2245,16 +2437,12 @@ export const appRouter = router({
       preparedBy: z.string().optional(),
       contactInfo: z.string().optional(),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, ...data } = input;
-      await db.update(specialQuotationTemplates).set(data).where(eq(specialQuotationTemplates.id, id));
+      await fsUpdateOne("special_quotation_templates", id, data);
       return { success: true };
     }),
     delete: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.update(specialQuotationTemplates).set({ isActive: 0 }).where(eq(specialQuotationTemplates.id, input.id));
+      await fsUpdateOne("special_quotation_templates", input.id, { isActive: 0 });
       return { success: true };
     }),
   }),
@@ -2267,37 +2455,34 @@ export const appRouter = router({
       page: z.number().optional(),
       limit: z.number().optional(),
     })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return { items: [], total: 0, page: 1, limit: 20, totalPages: 0 };
       const page = input.page || 1;
       const limit = input.limit || 20;
-      const offset = (page - 1) * limit;
-      const conditions: any[] = [];
+      let items = await fsListAll<SpecialQuotation>("special_quotations");
       if (input.search) {
-        conditions.push(or(
-          like(specialQuotations.customerName, `%${input.search}%`),
-          like(specialQuotations.quotationNumber, `%${input.search}%`),
-          like(specialQuotations.systemTitle, `%${input.search}%`),
-          like(specialQuotations.customerAddress, `%${input.search}%`),
-          like(specialQuotations.kwRating, `%${input.search}%`),
-          like(specialQuotations.setupType, `%${input.search}%`),
-          like(specialQuotations.preparedBy, `%${input.search}%`),
-          sql`DATE_FORMAT(${specialQuotations.createdAt}, '%Y-%m-%d') LIKE ${`%${input.search}%`}`,
-          sql`DATE_FORMAT(${specialQuotations.createdAt}, '%m/%Y') LIKE ${`%${input.search}%`}`,
-          sql`DATE_FORMAT(${specialQuotations.createdAt}, '%Y') LIKE ${`%${input.search}%`}`
-        ));
+        const s = input.search.toLowerCase();
+        items = items.filter(q => {
+          if ((q.customerName || "").toLowerCase().includes(s)) return true;
+          if ((q.quotationNumber || "").toLowerCase().includes(s)) return true;
+          if ((q.systemTitle || "").toLowerCase().includes(s)) return true;
+          if ((q.customerAddress || "").toLowerCase().includes(s)) return true;
+          if ((q.kwRating || "").toLowerCase().includes(s)) return true;
+          if ((q.setupType || "").toLowerCase().includes(s)) return true;
+          if ((q.preparedBy || "").toLowerCase().includes(s)) return true;
+          const d = q.createdAt;
+          const ymd = d.toISOString().slice(0, 10);
+          const my = `${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+          const y = String(d.getFullYear());
+          return ymd.includes(s) || my.includes(s) || y.includes(s);
+        });
       }
-      if (input.status) conditions.push(eq(specialQuotations.status, input.status as any));
-      const where = conditions.length > 0 ? and(...conditions) : undefined;
-      const [totalResult] = await db.select({ c: count() }).from(specialQuotations).where(where);
-      const items = await db.select().from(specialQuotations).where(where).orderBy(desc(specialQuotations.createdAt)).limit(limit).offset(offset);
-      return { items, total: totalResult.c, page, limit, totalPages: Math.ceil(totalResult.c / limit) };
+      if (input.status) items = items.filter(q => q.status === input.status);
+      items = items.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      const total = items.length;
+      const pageItems = items.slice((page - 1) * limit, (page - 1) * limit + limit);
+      return { items: pageItems, total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) };
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) return null;
-      const [q] = await db.select().from(specialQuotations).where(eq(specialQuotations.id, input.id)).limit(1);
-      return q || null;
+      return (await fsGetById<SpecialQuotation>("special_quotations", input.id)) || null;
     }),
     create: protectedProcedure.input(z.object({
       templateId: z.number().optional(),
@@ -2322,22 +2507,35 @@ export const appRouter = router({
       contactInfo: z.string().optional(),
       date: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const quotationNumber = `SQ-${Date.now().toString(36).toUpperCase()}`;
-      const [inserted] = await db.insert(specialQuotations).values({
-        ...input,
+      const id = await fsInsertOne("special_quotations", {
+        templateId: input.templateId ?? null,
         quotationNumber,
         date: input.date ? new Date(input.date) : new Date(),
+        customerName: input.customerName ?? null,
+        customerAddress: input.customerAddress ?? null,
+        systemTitle: input.systemTitle ?? null,
+        systemDescription: input.systemDescription ?? null,
+        kwRating: input.kwRating ?? null,
+        setupType: input.setupType ?? null,
+        items: input.items ?? null,
         subtotal: input.subtotal || null,
         vatRate: input.vatRate || null,
         vatAmount: input.vatAmount || null,
         discount: input.discount || null,
         total: input.total || null,
+        remarks: input.remarks ?? null,
+        warrantyClaims: input.warrantyClaims ?? null,
+        paymentTerms: input.paymentTerms ?? null,
+        paymentDetails: input.paymentDetails ?? null,
+        deliveryTerms: input.deliveryTerms ?? null,
+        preparedBy: input.preparedBy ?? null,
+        contactInfo: input.contactInfo ?? null,
+        status: "draft",
         createdBy: ctx.user.id,
         createdByName: ctx.user.name || "Admin",
-      }).$returningId();
-      return { success: true, id: inserted.id, quotationNumber };
+      });
+      return { success: true, id, quotationNumber };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
@@ -2363,18 +2561,14 @@ export const appRouter = router({
       status: z.enum(["draft", "sent", "accepted", "rejected"]).optional(),
       date: z.string().optional(),
     })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
       const { id, date, ...data } = input;
-      const updateData: any = { ...data };
+      const updateData: Record<string, unknown> = { ...data };
       if (date) updateData.date = new Date(date);
-      await db.update(specialQuotations).set(updateData).where(eq(specialQuotations.id, id));
+      await fsUpdateOne("special_quotations", id, updateData);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new Error("Database unavailable");
-      await db.delete(specialQuotations).where(eq(specialQuotations.id, input.id));
+      await fsDeleteOne("special_quotations", input.id);
       return { success: true };
     }),
   }),

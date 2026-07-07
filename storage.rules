@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Deny-all: file uploads/downloads are proxied through the Vercel serverless
+// API (server/_core/storageProxy.ts) using the Firebase Admin SDK, which
+// bypasses Security Rules entirely. No client ever talks to Storage directly.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

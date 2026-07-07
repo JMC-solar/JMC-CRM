@@ -1,9 +1,9 @@
-import { COOKIE_NAME } from "@shared/const";
-import { ForbiddenError } from "@shared/_core/errors";
+import { COOKIE_NAME } from "../../shared/const";
+import { ForbiddenError } from "../../shared/_core/errors";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
 import { SignJWT, jwtVerify } from "jose";
-import type { User } from "../../drizzle/schema";
+import type { User } from "../models";
 import * as db from "../db";
 import { ENV } from "./env";
 
@@ -127,11 +127,16 @@ class SDKServer {
       throw ForbiddenError("User not found");
     }
 
-    // Update last signed in
-    await db.upsertUser({
-      openId: user.openId,
-      lastSignedIn: new Date(),
-    });
+    // Throttle the lastSignedIn write — only bump it once every 6 hours
+    // instead of on every single request, to keep write volume down.
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    const lastSignedInAge = Date.now() - new Date(user.lastSignedIn).getTime();
+    if (lastSignedInAge > SIX_HOURS_MS) {
+      await db.upsertUser({
+        openId: user.openId,
+        lastSignedIn: new Date(),
+      });
+    }
 
     return user;
   }

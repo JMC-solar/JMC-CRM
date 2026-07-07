@@ -1,21 +1,30 @@
 import { Router } from "express";
-import { getDb } from "./db";
-import { deliveryReceipts, acknowledgementReceipts, quotationItems, specialQuotations, projects, quotations, projectPayments, netMeteringPayments, netMetering } from "../drizzle/schema";
-import { eq, and, lte } from "drizzle-orm";
+import { getById, listAll } from "./firestore";
+import type {
+  DeliveryReceipt,
+  AcknowledgementReceipt,
+  QuotationItem,
+  SpecialQuotation,
+  Project,
+  Quotation,
+  ProjectPayment,
+  NetMeteringPayment,
+  NetMetering,
+} from "./models";
 
 const router = Router();
 
 // Delivery Receipt printable HTML
 router.get("/api/delivery-receipts/:id/print", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const id = parseInt(req.params.id);
-    const [dr] = await db.select().from(deliveryReceipts).where(eq(deliveryReceipts.id, id)).limit(1);
+    const dr = await getById<DeliveryReceipt>("delivery_receipts", id);
     if (!dr) { res.status(404).json({ error: "Delivery Receipt not found" }); return; }
 
     // Get quotation items for this DR
-    const items = dr.quotationId ? await db.select().from(quotationItems).where(eq(quotationItems.quotationId, dr.quotationId)) : [];
+    const items = dr.quotationId
+      ? await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", dr.quotationId]] })
+      : [];
 
     const html = generateDeliveryReceiptHtml(dr, items);
     res.setHeader("Content-Type", "text/html");
@@ -30,74 +39,71 @@ router.get("/api/delivery-receipts/:id/print", async (req, res) => {
 // Acknowledgement Receipt printable HTML - Enhanced with full details
 router.get("/api/acknowledgement-receipts/:id/print", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const id = parseInt(req.params.id);
-    const [ack] = await db.select().from(acknowledgementReceipts).where(eq(acknowledgementReceipts.id, id)).limit(1);
+    const ack = await getById<AcknowledgementReceipt>("acknowledgement_receipts", id);
     if (!ack) { res.status(404).json({ error: "Acknowledgement Receipt not found" }); return; }
 
     // Fetch full project/quotation details based on type
-    let projectData: any = null;
-    let quotationData: any = null;
-    let quotationItemsData: any[] = [];
-    let allPayments: any[] = [];
+    let projectData: Project | null = null;
+    let quotationData: Quotation | null = null;
+    let quotationItemsData: QuotationItem[] = [];
+    let allPayments: (ProjectPayment | NetMeteringPayment)[] = [];
     let totalProjectAmount: number = 0;
-    let nmData: any = null;
+    let nmData: NetMetering | null = null;
 
     if (ack.type === "project_payment") {
       // Fetch the project
-      const [project] = await db.select().from(projects).where(eq(projects.id, ack.referenceId)).limit(1);
+      const project = await getById<Project>("projects", ack.referenceId);
       if (project) {
         projectData = project;
         totalProjectAmount = Number(project.totalProjectAmount || 0);
-        
+
         // Fetch quotation items if project has a linked quotation
         if (project.quotationId) {
-          const [quot] = await db.select().from(quotations).where(eq(quotations.id, project.quotationId)).limit(1);
+          const quot = await getById<Quotation>("quotations", project.quotationId);
           if (quot) {
             quotationData = quot;
-            quotationItemsData = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, quot.id));
+            quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
           }
         }
-        
+
         // Fetch all payments for this project up to and including this payment
-        allPayments = await db.select().from(projectPayments).where(eq(projectPayments.projectId, project.id));
+        allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", project.id]] });
       }
     } else if (ack.type === "net_metering_payment") {
       // referenceId is the netMeteringPayment ID - find the NM record
-      const nmPayments = await db.select().from(netMeteringPayments).where(eq(netMeteringPayments.id, ack.referenceId)).limit(1);
-      if (nmPayments.length > 0) {
-        const nmPayment = nmPayments[0];
+      const nmPayment = await getById<NetMeteringPayment>("net_metering_payments", ack.referenceId);
+      if (nmPayment) {
         // Get the net metering record
-        const [nm] = await db.select().from(netMetering).where(eq(netMetering.id, nmPayment.netMeteringId)).limit(1);
+        const nm = await getById<NetMetering>("net_metering", nmPayment.netMeteringId);
         if (nm) {
           nmData = nm;
           // Get the project if linked
           if (nm.projectId) {
-            const [project] = await db.select().from(projects).where(eq(projects.id, nm.projectId)).limit(1);
+            const project = await getById<Project>("projects", nm.projectId);
             if (project) {
               projectData = project;
               totalProjectAmount = Number(project.totalProjectAmount || 0);
               if (project.quotationId) {
-                const [quot] = await db.select().from(quotations).where(eq(quotations.id, project.quotationId)).limit(1);
+                const quot = await getById<Quotation>("quotations", project.quotationId);
                 if (quot) {
                   quotationData = quot;
-                  quotationItemsData = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, quot.id));
+                  quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
                 }
               }
             }
           }
           // Get all NM payments for this NM record
-          allPayments = await db.select().from(netMeteringPayments).where(eq(netMeteringPayments.netMeteringId, nm.id));
+          allPayments = await listAll<NetMeteringPayment>("net_metering_payments", { where: [["netMeteringId", "==", nm.id]] });
         }
       }
     } else if (ack.type === "quotation") {
       // Fetch quotation directly
-      const [quot] = await db.select().from(quotations).where(eq(quotations.id, ack.referenceId)).limit(1);
+      const quot = await getById<Quotation>("quotations", ack.referenceId);
       if (quot) {
         quotationData = quot;
         totalProjectAmount = Number(quot.totalAmount || 0);
-        quotationItemsData = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, quot.id));
+        quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
       }
     }
 
@@ -597,10 +603,8 @@ function generateAcknowledgementHtml(ack: any, context: {
 // Special Quotation printable HTML
 router.get("/api/special-quotations/:id/print", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const id = parseInt(req.params.id);
-    const [sq] = await db.select().from(specialQuotations).where(eq(specialQuotations.id, id)).limit(1);
+    const sq = await getById<SpecialQuotation>("special_quotations", id);
     if (!sq) { res.status(404).json({ error: "Special Quotation not found" }); return; }
 
     const html = generateSpecialQuotationHtml(sq);

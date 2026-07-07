@@ -1,31 +1,9 @@
-// Direct AWS S3 storage helpers for file uploads and downloads.
-// Uploads directly to your own S3 bucket using presigned URLs.
-// Downloads return /storage/{key} paths served via the storage proxy.
+// Firebase Storage helpers for file uploads and downloads.
+// Uploads go to this project's default Storage bucket (see server/firestore.ts `bucket()`).
+// Uploaded files are served back via GET /storage/{key}, which the storage
+// proxy (server/_core/storageProxy.ts) redirects to a short-lived signed URL.
 
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { ENV } from "./_core/env";
-
-let _s3Client: S3Client | null = null;
-
-function getS3Client(): S3Client {
-  if (!_s3Client) {
-    const config: any = {
-      region: ENV.s3Region,
-      credentials: {
-        accessKeyId: ENV.s3AccessKeyId,
-        secretAccessKey: ENV.s3SecretAccessKey,
-      },
-    };
-    // Support S3-compatible services (DigitalOcean Spaces, MinIO, etc.)
-    if (ENV.s3Endpoint) {
-      config.endpoint = ENV.s3Endpoint;
-      config.forcePathStyle = true;
-    }
-    _s3Client = new S3Client(config);
-  }
-  return _s3Client;
-}
+import { bucket } from "./firestore";
 
 function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
@@ -38,62 +16,64 @@ function appendHashSuffix(relKey: string): string {
   return `${relKey.slice(0, lastDot)}_${hash}${relKey.slice(lastDot)}`;
 }
 
+/** Wraps a Firebase/GCS error with a clearer, non-crashing message. */
+function wrapStorageError(action: string, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`Firebase Storage ${action} failed: ${message}`);
+}
+
 /**
- * Upload a file to S3
- * Returns the storage key and a local URL path for serving the file
+ * Upload a file to Firebase Storage.
+ * Returns the storage key and a local URL path for serving the file.
  */
 export async function storagePut(
   relKey: string,
   data: Buffer | Uint8Array | string,
   contentType = "application/octet-stream",
 ): Promise<{ key: string; url: string }> {
-  if (!ENV.s3Bucket || !ENV.s3AccessKeyId || !ENV.s3SecretAccessKey) {
-    throw new Error(
-      "S3 config missing: set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY"
-    );
+  const key = appendHashSuffix(normalizeKey(relKey));
+  const body = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
+
+  try {
+    await bucket().file(key).save(body, { contentType });
+  } catch (err) {
+    throw wrapStorageError("upload", err);
   }
 
-  const key = appendHashSuffix(normalizeKey(relKey));
-  const s3 = getS3Client();
-
-  const body = typeof data === "string" ? Buffer.from(data) : data;
-
-  await s3.send(new PutObjectCommand({
-    Bucket: ENV.s3Bucket,
-    Key: key,
-    Body: body,
-    ContentType: contentType,
-  }));
-
   return { key, url: `/storage/${key}` };
 }
 
 /**
- * Get a local URL path for a stored file
+ * Download a file's contents from Firebase Storage.
  */
-export async function storageGet(relKey: string): Promise<{ key: string; url: string }> {
+export async function storageGet(
+  relKey: string,
+): Promise<{ key: string; url: string; data: Buffer }> {
   const key = normalizeKey(relKey);
-  return { key, url: `/storage/${key}` };
+
+  let data: Buffer;
+  try {
+    [data] = await bucket().file(key).download();
+  } catch (err) {
+    throw wrapStorageError("download", err);
+  }
+
+  return { key, url: `/storage/${key}`, data };
 }
 
 /**
- * Get a presigned download URL directly from S3
+ * Get a presigned (signed) read URL directly from Firebase Storage.
  */
 export async function storageGetSignedUrl(relKey: string): Promise<string> {
-  if (!ENV.s3Bucket || !ENV.s3AccessKeyId || !ENV.s3SecretAccessKey) {
-    throw new Error(
-      "S3 config missing: set S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY"
-    );
-  }
-
   const key = normalizeKey(relKey);
-  const s3 = getS3Client();
 
-  const command = new GetObjectCommand({
-    Bucket: ENV.s3Bucket,
-    Key: key,
-  });
-
-  const url = await getSignedUrl(s3, command, { expiresIn: 3600 }); // 1 hour
-  return url;
+  try {
+    const [url] = await bucket().file(key).getSignedUrl({
+      action: "read",
+      expires: Date.now() + 3600e3, // 1 hour
+    });
+    return url;
+  } catch (err) {
+    throw wrapStorageError("signed URL generation", err);
+  }
 }

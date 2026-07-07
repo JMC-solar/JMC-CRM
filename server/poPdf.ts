@@ -1,32 +1,26 @@
 import { Router } from "express";
-import { getDb } from "./db";
-import { purchaseOrders, purchaseOrderItems, suppliers } from "../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { getById, listAll } from "./firestore";
+import type { PurchaseOrder, PurchaseOrderItem, Supplier } from "./models";
 
 const router = Router();
 
 router.get("/api/purchase-orders/:id/pdf", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) {
-      res.status(500).json({ error: "Database unavailable" });
-      return;
-    }
-
     const id = parseInt(req.params.id);
-    const [po] = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    const po = await getById<PurchaseOrder>("purchase_orders", id);
     if (!po) {
       res.status(404).json({ error: "Purchase Order not found" });
       return;
     }
 
-    const items = await db.select().from(purchaseOrderItems).where(eq(purchaseOrderItems.purchaseOrderId, id));
+    const items = await listAll<PurchaseOrderItem>("purchase_order_items", {
+      where: [["purchaseOrderId", "==", id]],
+    });
 
     // Get supplier details
-    let supplier: any = null;
+    let supplier: Supplier | null = null;
     if (po.supplierId) {
-      const [s] = await db.select().from(suppliers).where(eq(suppliers.id, po.supplierId)).limit(1);
-      supplier = s || null;
+      supplier = (await getById<Supplier>("suppliers", po.supplierId)) || null;
     }
 
     const createdByUser = po.createdByName ? { name: po.createdByName } : null;

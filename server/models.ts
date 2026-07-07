@@ -1,0 +1,608 @@
+/**
+ * Plain TS interfaces for the Firestore data layer, mechanically ported from
+ * drizzle/schema.ts `$inferSelect` shapes (see that file for the MySQL source
+ * of truth during the migration window). Conventions:
+ *  - int ids stay `number`
+ *  - decimal columns stay `string` (e.g. "1234.50")
+ *  - timestamp columns stay `Date`
+ *  - tinyint-as-flag int columns (vatEnabled, isActive, discountType flags) stay `number`
+ *  - real drizzle `boolean()` columns stay `boolean`
+ *  - json columns are typed as their array/object shape
+ *  - nullable columns are `T | null`
+ */
+
+// ============ USERS ============
+// NOTE: passwordPlain is intentionally omitted — plaintext passwords are not
+// carried over into Firestore. See server/localAuth.ts.
+export interface User {
+  id: number;
+  openId: string;
+  username: string | null;
+  passwordHash: string | null;
+  resetToken: string | null;
+  resetTokenExpiry: Date | null;
+  totpSecret: string | null;
+  totpEnabled: boolean;
+  name: string | null;
+  email: string | null;
+  mobile: string | null;
+  loginMethod: string | null;
+  role: "admin" | "subadmin" | "purchaser" | "staff" | "sales_rep";
+  status: "active" | "inactive";
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  lastSignedIn: Date;
+}
+
+// ============ CRM: CONTACTS ============
+export interface Contact {
+  id: number;
+  firstName: string;
+  lastName: string | null;
+  email: string | null;
+  phone: string | null;
+  company: string | null;
+  position: string | null;
+  address: string | null;
+  city: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ CRM: ACCOUNTS ============
+export interface Account {
+  id: number;
+  name: string;
+  industry: string | null;
+  phone: string | null;
+  email: string | null;
+  website: string | null;
+  address: string | null;
+  city: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ CRM: LEADS ============
+export interface Lead {
+  id: number;
+  firstName: string;
+  lastName: string | null;
+  email: string | null;
+  phone: string | null;
+  company: string | null;
+  source: string | null;
+  status: "new" | "contacted" | "qualified" | "proposal" | "won" | "lost";
+  systemSize: string | null;
+  estimatedValue: string | null;
+  notes: string | null;
+  contactId: number | null;
+  accountId: number | null;
+  assignedTo: number | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ CRM: OPPORTUNITIES ============
+export interface Opportunity {
+  id: number;
+  title: string;
+  status: "new" | "contacted" | "qualified" | "proposal" | "won" | "lost";
+  value: string | null;
+  systemSize: string | null;
+  systemType: string | null;
+  contactId: number | null;
+  accountId: number | null;
+  leadId: number | null;
+  assignedTo: number | null;
+  expectedCloseDate: Date | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ CRM: ACTIVITIES ============
+export interface Activity {
+  id: number;
+  type: "call" | "email" | "meeting" | "site_visit" | "follow_up" | "note";
+  subject: string;
+  description: string | null;
+  contactId: number | null;
+  opportunityId: number | null;
+  leadId: number | null;
+  scheduledAt: Date | null;
+  completedAt: Date | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ INVENTORY: ITEMS ============
+export interface InventoryItem {
+  id: number;
+  sku: string;
+  name: string;
+  description: string | null;
+  category: "panels" | "inverters" | "batteries" | "accessories" | "mounting" | "cabling" | "breakers";
+  brand: string | null;
+  model: string | null;
+  specs: string | null;
+  unit: string | null;
+  purchasePrice: string | null;
+  sellingPrice: string | null;
+  stockOnHand: number;
+  stockReserved: number;
+  reorderLevel: number | null;
+  warehouseLocation: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ INVENTORY: STOCK TRANSACTIONS ============
+export interface StockTransaction {
+  id: number;
+  itemId: number;
+  type: "stock_in" | "stock_out" | "adjustment" | "reserved" | "unreserved";
+  quantity: number;
+  reference: string | null;
+  purpose: string | null;
+  purposeRefId: number | null;
+  purposeRefName: string | null;
+  accountId: number | null;
+  accountName: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+}
+
+// ============ INVENTORY: PURCHASE ORDERS ============
+export interface PurchaseOrder {
+  id: number;
+  poNumber: string;
+  supplier: string;
+  supplierId: number | null;
+  status: "draft" | "sent" | "received" | "cancelled";
+  deliveryStatus: "not_delivered" | "partially_delivered" | "fully_delivered";
+  paymentStatus: "unpaid" | "partially_paid" | "paid";
+  totalAmount: string | null;
+  paidAmount: string | null;
+  vatEnabled: number | null;
+  vatRate: string | null;
+  discountType: "none" | "percentage" | "fixed" | null;
+  discountValue: string | null;
+  notes: string | null;
+  orderedAt: Date | null;
+  receivedAt: Date | null;
+  deliveredAt: Date | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ INVENTORY: PURCHASE ORDER ITEMS ============
+export interface PurchaseOrderItem {
+  id: number;
+  purchaseOrderId: number;
+  itemId: number;
+  itemName: string | null;
+  itemSku: string | null;
+  description: string | null;
+  unit: string | null;
+  quantity: number;
+  unitPrice: string | null;
+  lineTotal: string | null;
+  receivedQuantity: number | null;
+  createdAt: Date;
+}
+
+// ============ INVENTORY: PO PAYMENTS ============
+export interface PoPayment {
+  id: number;
+  purchaseOrderId: number;
+  amount: string;
+  paymentDate: Date;
+  reference: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+}
+
+// ============ BOM: PACKAGES ============
+export interface BomPackage {
+  id: number;
+  name: string;
+  description: string | null;
+  systemSize: string | null;
+  systemType: string | null;
+  totalCost: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ BOM: PACKAGE ITEMS ============
+export interface BomPackageItem {
+  id: number;
+  packageId: number;
+  itemId: number;
+  quantity: number;
+  createdAt: Date;
+}
+
+// ============ QUOTATIONS ============
+export interface Quotation {
+  id: number;
+  quoteNumber: string;
+  version: number;
+  title: string;
+  status: "draft" | "pending_approval" | "approved" | "sent" | "accepted" | "rejected" | "expired";
+  opportunityId: number | null;
+  contactId: number | null;
+  accountId: number | null;
+  customerName: string | null;
+  customerEmail: string | null;
+  customerPhone: string | null;
+  customerAddress: string | null;
+  subtotal: string | null;
+  discountPercent: string | null;
+  discountManualAmount: string | null;
+  discountAmount: string | null;
+  vatEnabled: number;
+  taxPercent: string | null;
+  taxAmount: string | null;
+  totalAmount: string | null;
+  laborCost: string | null;
+  installationFee: string | null;
+  lastEditedBy: number | null;
+  paymentTerms: string | null;
+  warrantyTerms: string | null;
+  validUntil: Date | null;
+  notes: string | null;
+  approvedBy: number | null;
+  approvedAt: Date | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ QUOTATION LINE ITEMS ============
+export interface QuotationItem {
+  id: number;
+  quotationId: number;
+  itemId: number | null;
+  itemType: "inventory" | "labor" | "custom";
+  description: string;
+  quantity: number;
+  unitPrice: string;
+  totalPrice: string;
+  createdAt: Date;
+}
+
+// ============ SUPPLIERS ============
+export interface Supplier {
+  id: number;
+  name: string;
+  code: string | null;
+  contactPerson: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  city: string | null;
+  paymentTerms: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ CONFIGURABLE OPTIONS (Admin-managed dropdowns) ============
+export interface ConfigOption {
+  id: number;
+  category: string;
+  value: string;
+  sortOrder: number | null;
+  isActive: number;
+  createdAt: Date;
+}
+
+// ============ AUDIT LOG ============
+export interface AuditLog {
+  id: number;
+  userId: number | null;
+  // Denormalized at write time (see server/firestore.ts#audit) since Firestore
+  // has no server-side join to fetch it at read time the way MySQL did.
+  userName: string | null;
+  action: string;
+  entity: string;
+  entityId: number | null;
+  details: string | null;
+  createdAt: Date;
+}
+
+// ============ PROJECT MONITORING ============
+export interface Project {
+  id: number;
+  name: string;
+  description: string | null;
+  sizeOfSetup: string | null;
+  typeOfSetup: string | null;
+  customerName: string | null;
+  address: string | null;
+  stage: "procurement" | "implementation" | "ongoing" | "completed";
+  startDate: Date | null;
+  targetCompletionDate: Date | null;
+  completedDate: Date | null;
+  opportunityId: number | null;
+  quotationId: number | null;
+  contactId: number | null;
+  totalProjectAmount: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ PROJECT STATUS HISTORY ============
+export interface ProjectStatusHistory {
+  id: number;
+  projectId: number;
+  fromStage: string | null;
+  toStage: string;
+  notes: string | null;
+  changedBy: number | null;
+  changedByName: string | null;
+  createdAt: Date;
+}
+
+// ============ NET METERING ============
+export interface NetMetering {
+  id: number;
+  projectId: number | null;
+  clientName: string;
+  projectName: string | null;
+  address: string | null;
+  sizeOfSetup: string | null;
+  typeOfSetup: string | null;
+  status:
+    | "plan_drawings"
+    | "submitted_lgu"
+    | "submitted_fire"
+    | "submitted_electric"
+    | "approved"
+    | "completed_energized";
+  electricCompany: string | null;
+  applicationNumber: string | null;
+  notes: string | null;
+  submittedDate: Date | null;
+  approvedDate: Date | null;
+  completedDate: Date | null;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ STOCK ADJUSTMENTS (Admin-only) ============
+export interface StockAdjustment {
+  id: number;
+  itemId: number;
+  previousQuantity: number;
+  newQuantity: number;
+  adjustmentQuantity: number;
+  reason: string;
+  status: "pending" | "approved" | "rejected";
+  requestedBy: number | null;
+  requestedByName: string | null;
+  approvedBy: number | null;
+  approvedByName: string | null;
+  approvedAt: Date | null;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ INVENTORY AUDIT LOG ============
+export interface InventoryAuditLog {
+  id: number;
+  itemId: number;
+  itemName: string | null;
+  itemSku: string | null;
+  transactionType: "stock_in" | "stock_out" | "transfer_in" | "transfer_out" | "adjustment" | "initial";
+  quantity: number;
+  previousStock: number;
+  newStock: number;
+  sourceLocation: string | null;
+  destinationLocation: string | null;
+  reference: string | null;
+  purpose: string | null;
+  notes: string | null;
+  performedBy: number | null;
+  performedByName: string | null;
+  createdAt: Date;
+}
+
+// ============ SUPPLIER-ITEM PRICES ============
+export interface SupplierItemPrice {
+  id: number;
+  supplierId: number;
+  inventoryItemId: number;
+  unitPrice: string;
+  lastPurchaseOrderId: number | null;
+  updatedBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ PROJECT PAYMENTS ============
+export interface ProjectPayment {
+  id: number;
+  projectId: number;
+  paymentDate: Date;
+  amount: string;
+  paymentMethod: string | null;
+  paymentReference: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+}
+
+// ============ NET METERING PAYMENTS ============
+export interface NetMeteringPayment {
+  id: number;
+  projectId: number;
+  netMeteringId: number;
+  paymentDate: Date;
+  amount: string;
+  paymentMethod: string | null;
+  paymentReference: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+}
+
+// ============ DELIVERY RECEIPTS ============
+export interface DeliveryReceipt {
+  id: number;
+  quotationId: number;
+  receiptNumber: string;
+  deliveryDate: Date;
+  customerName: string | null;
+  customerAddress: string | null;
+  projectReference: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+}
+
+// ============ ACKNOWLEDGEMENT RECEIPTS ============
+export interface AcknowledgementReceipt {
+  id: number;
+  type: "quotation" | "project_payment" | "net_metering_payment";
+  referenceId: number;
+  receiptNumber: string;
+  customerName: string | null;
+  projectReference: string | null;
+  amount: string | null;
+  paymentDate: Date | null;
+  paymentMethod: string | null;
+  paymentReference: string | null;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+}
+
+// Line item shape stored in specialQuotationTemplates.items / specialQuotations.items.
+// Not enforced by a zod schema upstream — verified against client/src/pages/SpecialQuotationEdit.tsx
+// (which always initializes every field to "" / "1" / "LOT", never omitting a key) and
+// server/documentPdf.ts's generateSpecialQuotationHtml (which reads description/qty/unit/
+// unitPrice/total/notes/warranty — "illustration" is a legacy/unused DB comment artifact,
+// never read or written anywhere in the app).
+export interface SpecialQuotationLineItem {
+  description: string;
+  qty: string;
+  unit: string;
+  unitPrice: string;
+  total: string;
+  notes: string;
+  warranty: string;
+}
+
+// ============ SPECIAL QUOTATION TEMPLATES ============
+export interface SpecialQuotationTemplate {
+  id: number;
+  name: string;
+  description: string | null;
+  systemTitle: string | null;
+  systemDescription: string | null;
+  kwRating: string | null;
+  setupType: string | null;
+  items: SpecialQuotationLineItem[] | null;
+  subtotal: string | null;
+  vatRate: string | null;
+  discount: string | null;
+  remarks: string | null;
+  warrantyClaims: string | null;
+  paymentTerms: string | null;
+  paymentDetails: string | null;
+  deliveryTerms: string | null;
+  preparedBy: string | null;
+  contactInfo: string | null;
+  isActive: number;
+  createdBy: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ SPECIAL QUOTATIONS (instances from templates) ============
+export interface SpecialQuotation {
+  id: number;
+  templateId: number | null;
+  quotationNumber: string;
+  date: Date | null;
+  customerName: string | null;
+  customerAddress: string | null;
+  systemTitle: string | null;
+  systemDescription: string | null;
+  kwRating: string | null;
+  setupType: string | null;
+  items: SpecialQuotationLineItem[] | null;
+  subtotal: string | null;
+  vatRate: string | null;
+  vatAmount: string | null;
+  discount: string | null;
+  total: string | null;
+  remarks: string | null;
+  warrantyClaims: string | null;
+  paymentTerms: string | null;
+  paymentDetails: string | null;
+  deliveryTerms: string | null;
+  preparedBy: string | null;
+  contactInfo: string | null;
+  status: "draft" | "sent" | "accepted" | "rejected";
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ TWO-FACTOR AUTH CODES ============
+export interface TwoFactorCode {
+  id: number;
+  userId: number;
+  code: string;
+  expiresAt: Date;
+  used: boolean;
+  createdAt: Date;
+}
+
+// ============ INVENTORY: ITEM PRICE HISTORY ============
+export interface ItemPriceHistory {
+  id: number;
+  itemId: number;
+  priceType: "purchase" | "selling";
+  oldPrice: string | null;
+  newPrice: string | null;
+  changedBy: number | null;
+  changedByName: string | null;
+  notes: string | null;
+  createdAt: Date;
+}
+
+/** money(1234.5) => "1234.50" — matches drizzle decimal column string wire-shape. */
+export function money(n: number): string {
+  return n.toFixed(2);
+}

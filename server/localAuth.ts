@@ -1,8 +1,8 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import { eq, and } from "drizzle-orm";
-import { users } from "../drizzle/schema";
-import { getDb } from "./db";
+import {
+  getUserByUsername, getUserById, getUserByEmail, getUserByResetToken, updateUser,
+} from "./firestore-users";
 import { sdk } from "./_core/sdk";
 import { COOKIE_NAME } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -20,17 +20,10 @@ localAuthRouter.post("/api/auth/local/login", async (req, res) => {
       return res.status(400).json({ error: "Username and password are required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
     // Find user by username
-    const [user] = await db.select().from(users).where(
-      and(eq(users.username, username), eq(users.status, "active"))
-    );
+    const user = await getUserByUsername(username);
 
-    if (!user || !user.passwordHash) {
+    if (!user || user.status !== "active" || !user.passwordHash) {
       return res.status(401).json({ error: "Invalid username or password" });
     }
 
@@ -52,7 +45,7 @@ localAuthRouter.post("/api/auth/local/login", async (req, res) => {
     }
 
     // No 2FA - log in directly
-    await db.update(users).set({ lastSignedIn: new Date() }).where(eq(users.id, user.id));
+    await updateUser(user.id, { lastSignedIn: new Date() });
     const sessionToken = await sdk.createSessionToken(user.openId, { name: user.name || username });
     const cookieOptions = getSessionCookieOptions(req);
     const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
@@ -78,12 +71,7 @@ localAuthRouter.post("/api/auth/local/verify-totp", async (req, res) => {
       return res.status(400).json({ error: "User ID and code are required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    const user = await getUserById(userId);
     if (!user || !user.totpSecret) {
       return res.status(401).json({ error: "Invalid request" });
     }
@@ -105,7 +93,7 @@ localAuthRouter.post("/api/auth/local/verify-totp", async (req, res) => {
     }
 
     // Code is valid - complete login
-    await db.update(users).set({ lastSignedIn: new Date() }).where(eq(users.id, user.id));
+    await updateUser(user.id, { lastSignedIn: new Date() });
     const sessionToken = await sdk.createSessionToken(user.openId, { name: user.name || user.username || "" });
     const cookieOptions = getSessionCookieOptions(req);
     const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
@@ -130,12 +118,7 @@ localAuthRouter.post("/api/auth/local/totp/setup", async (req, res) => {
       return res.status(400).json({ error: "User ID is required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    const user = await getUserById(userId);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
@@ -156,7 +139,7 @@ localAuthRouter.post("/api/auth/local/totp/setup", async (req, res) => {
     const qrCodeDataUrl = await QRCode.toDataURL(otpauthUri);
 
     // Store the secret temporarily (not enabled yet until confirmed)
-    await db.update(users).set({ totpSecret: secret.base32 }).where(eq(users.id, user.id));
+    await updateUser(user.id, { totpSecret: secret.base32 });
 
     return res.json({
       success: true,
@@ -178,12 +161,7 @@ localAuthRouter.post("/api/auth/local/totp/confirm", async (req, res) => {
       return res.status(400).json({ error: "User ID and code are required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    const user = await getUserById(userId);
     if (!user || !user.totpSecret) {
       return res.status(400).json({ error: "TOTP setup not initiated. Please start setup first." });
     }
@@ -205,7 +183,7 @@ localAuthRouter.post("/api/auth/local/totp/confirm", async (req, res) => {
     }
 
     // Enable TOTP
-    await db.update(users).set({ totpEnabled: true }).where(eq(users.id, user.id));
+    await updateUser(user.id, { totpEnabled: true });
     console.log(`[LocalAuth] TOTP enabled for user ${userId}`);
 
     return res.json({ success: true, message: "Two-factor authentication has been enabled successfully." });
@@ -223,12 +201,7 @@ localAuthRouter.post("/api/auth/local/totp/disable", async (req, res) => {
       return res.status(400).json({ error: "User ID is required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    const user = await getUserById(userId);
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
@@ -253,7 +226,7 @@ localAuthRouter.post("/api/auth/local/totp/disable", async (req, res) => {
     }
 
     // Disable and clear TOTP
-    await db.update(users).set({ totpEnabled: false, totpSecret: null }).where(eq(users.id, user.id));
+    await updateUser(user.id, { totpEnabled: false, totpSecret: null });
 
     return res.json({ success: true, message: "Two-factor authentication has been disabled." });
   } catch (error) {
@@ -270,13 +243,8 @@ localAuthRouter.post("/api/auth/local/forgot-password", async (req, res) => {
       return res.status(400).json({ error: "Email address is required" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
     // Find user by email
-    const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
+    const user = await getUserByEmail(email);
 
     // Always return success to prevent email enumeration
     if (!user) {
@@ -287,7 +255,7 @@ localAuthRouter.post("/api/auth/local/forgot-password", async (req, res) => {
     const resetToken = nanoid(40);
     const resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-    await db.update(users).set({ resetToken, resetTokenExpiry }).where(eq(users.id, user.id));
+    await updateUser(user.id, { resetToken, resetTokenExpiry });
 
     // Build reset link
     const origin = req.headers.origin || req.headers.referer?.replace(/\/$/, "") || "";
@@ -319,13 +287,8 @@ localAuthRouter.post("/api/auth/local/reset-password", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 6 characters" });
     }
 
-    const db = await getDb();
-    if (!db) {
-      return res.status(500).json({ error: "Database unavailable" });
-    }
-
     // Find user by reset token
-    const [user] = await db.select().from(users).where(eq(users.resetToken, token)).limit(1);
+    const user = await getUserByResetToken(token);
 
     if (!user) {
       return res.status(400).json({ error: "Invalid or expired reset token" });
@@ -338,12 +301,11 @@ localAuthRouter.post("/api/auth/local/reset-password", async (req, res) => {
 
     // Update password
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await db.update(users).set({
+    await updateUser(user.id, {
       passwordHash,
-      passwordPlain: newPassword,
       resetToken: null,
       resetTokenExpiry: null,
-    }).where(eq(users.id, user.id));
+    });
 
     return res.json({ success: true, message: "Password has been reset successfully. You can now log in with your new password." });
   } catch (error) {
@@ -360,38 +322,4 @@ export async function hashPassword(password: string): Promise<string> {
 // Helper: generate a unique openId for locally-created users
 export function generateLocalOpenId(): string {
   return `local_${nanoid(20)}`;
-}
-
-// Seed default admin account on startup
-export async function seedDefaultAdmin(): Promise<void> {
-  try {
-    const db = await getDb();
-    if (!db) {
-      console.warn("[LocalAuth] Cannot seed admin: database not available");
-      return;
-    }
-    // Check if admin with username 'jmcsolar' already exists
-    const [existing] = await db.select().from(users).where(eq(users.username, "jmcsolar")).limit(1);
-    if (existing) {
-      console.log("[LocalAuth] Default admin account already exists");
-      return;
-    }
-    // Create default admin
-    const passwordHash = await bcrypt.hash("juanmiguel888", 12);
-    await db.insert(users).values({
-      openId: `local_admin_${nanoid(10)}`,
-      username: "jmcsolar",
-      passwordHash,
-      passwordPlain: "juanmiguel888",
-      name: "JMC Solar Admin",
-      email: "jmcsolarph@gmail.com",
-      role: "admin",
-      status: "active",
-      loginMethod: "local",
-      lastSignedIn: new Date(),
-    });
-    console.log("[LocalAuth] Default admin account created (username: jmcsolar)");
-  } catch (error) {
-    console.error("[LocalAuth] Failed to seed default admin:", error);
-  }
 }

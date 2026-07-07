@@ -1,21 +1,43 @@
 import { Router } from "express";
-import { getDb } from "./db";
-import { contacts, inventoryItems, quotations, projects, projectPayments } from "../drizzle/schema";
-import { eq, like, and, or, desc, sql, gte, lte, inArray, count, sum } from "drizzle-orm";
+import { listAll } from "./firestore";
+import type { Contact, InventoryItem, Quotation, Project, ProjectPayment } from "./models";
 import ExcelJS from "exceljs";
 
 const router = Router();
 
+// ============ IN-MEMORY FILTER/SORT HELPERS ============
+// Firestore has no server-side LIKE/OR text search, so free-text search is
+// done client-side against the same field lists the old SQL LIKE clauses
+// used. Equality/date-range filters are also applied in-memory (rather than
+// as Firestore `.where()` clauses) to avoid requiring composite indexes for
+// arbitrary field + orderBy(createdAt) combinations on these export routes.
+function filterBySearch<T>(
+  items: T[],
+  search: string | undefined,
+  fields: string[]
+): T[] {
+  const q = search?.trim().toLowerCase();
+  if (!q) return items;
+  return items.filter(item =>
+    fields.some(field => {
+      const value = (item as any)[field];
+      if (value === null || value === undefined) return false;
+      return String(value).toLowerCase().includes(q);
+    })
+  );
+}
+
+function sortByCreatedAtDesc<T extends { createdAt: Date }>(items: T[]): T[] {
+  return [...items].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
 // ============ CONTACTS EXPORT ============
 router.get("/api/export/contacts", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const { search, format } = req.query as { search?: string; format?: string };
-    const conditions: any[] = [];
-    if (search) conditions.push(or(like(contacts.firstName, `%${search}%`), like(contacts.lastName, `%${search}%`), like(contacts.email, `%${search}%`), like(contacts.company, `%${search}%`), like(contacts.phone, `%${search}%`), like(contacts.position, `%${search}%`), like(contacts.city, `%${search}%`), like(contacts.address, `%${search}%`)));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-    const items = await db.select().from(contacts).where(where).orderBy(desc(contacts.createdAt)).limit(2000);
+    let items = await listAll<Contact>("contacts");
+    items = filterBySearch(items, search, ["firstName", "lastName", "email", "company", "phone", "position", "city", "address"]);
+    items = sortByCreatedAtDesc(items).slice(0, 2000);
 
     const columns = [
       { header: "Name", key: "name" },
@@ -57,14 +79,11 @@ router.get("/api/export/contacts", async (req, res) => {
 // ============ INVENTORY EXPORT ============
 router.get("/api/export/inventory", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const { search, category, format } = req.query as { search?: string; category?: string; format?: string };
-    const conditions: any[] = [];
-    if (search) conditions.push(or(like(inventoryItems.name, `%${search}%`), like(inventoryItems.sku, `%${search}%`), like(inventoryItems.brand, `%${search}%`), like(inventoryItems.model, `%${search}%`), like(inventoryItems.description, `%${search}%`), like(inventoryItems.warehouseLocation, `%${search}%`)));
-    if (category) conditions.push(eq(inventoryItems.category, category as any));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-    const items = await db.select().from(inventoryItems).where(where).orderBy(desc(inventoryItems.createdAt)).limit(5000);
+    let items = await listAll<InventoryItem>("inventory_items");
+    if (category) items = items.filter(i => i.category === category);
+    items = filterBySearch(items, search, ["name", "sku", "brand", "model", "description", "warehouseLocation"]);
+    items = sortByCreatedAtDesc(items).slice(0, 5000);
 
     const columns = [
       { header: "SKU", key: "sku" },
@@ -112,15 +131,18 @@ router.get("/api/export/inventory", async (req, res) => {
 // ============ QUOTATIONS EXPORT ============
 router.get("/api/export/quotations", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const { search, dateFrom, dateTo, format } = req.query as { search?: string; dateFrom?: string; dateTo?: string; format?: string };
-    const conditions: any[] = [];
-    if (search) conditions.push(or(like(quotations.customerName, `%${search}%`), like(quotations.title, `%${search}%`), like(quotations.quoteNumber, `%${search}%`), like(quotations.customerAddress, `%${search}%`), like(quotations.customerEmail, `%${search}%`), like(quotations.notes, `%${search}%`)));
-    if (dateFrom) conditions.push(gte(quotations.createdAt, new Date(dateFrom)));
-    if (dateTo) conditions.push(lte(quotations.createdAt, new Date(dateTo + "T23:59:59")));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-    const items = await db.select().from(quotations).where(where).orderBy(desc(quotations.createdAt)).limit(2000);
+    let items = await listAll<Quotation>("quotations");
+    if (dateFrom) {
+      const from = new Date(dateFrom);
+      items = items.filter(q => new Date(q.createdAt) >= from);
+    }
+    if (dateTo) {
+      const to = new Date(dateTo + "T23:59:59");
+      items = items.filter(q => new Date(q.createdAt) <= to);
+    }
+    items = filterBySearch(items, search, ["customerName", "title", "quoteNumber", "customerAddress", "customerEmail", "notes"]);
+    items = sortByCreatedAtDesc(items).slice(0, 2000);
 
     const columns = [
       { header: "Quote #", key: "quoteNumber" },
@@ -162,22 +184,22 @@ router.get("/api/export/quotations", async (req, res) => {
 // ============ PROJECTS EXPORT ============
 router.get("/api/export/projects", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) { res.status(500).json({ error: "Database unavailable" }); return; }
     const { search, stage, typeOfSetup, format } = req.query as { search?: string; stage?: string; typeOfSetup?: string; format?: string };
-    const conditions: any[] = [];
-    if (search) conditions.push(or(like(projects.name, `%${search}%`), like(projects.customerName, `%${search}%`), like(projects.address, `%${search}%`), like(projects.sizeOfSetup, `%${search}%`), like(projects.typeOfSetup, `%${search}%`), like(projects.description, `%${search}%`), like(projects.notes, `%${search}%`)));
-    if (stage) conditions.push(eq(projects.stage, stage as any));
-    if (typeOfSetup) conditions.push(eq(projects.typeOfSetup, typeOfSetup));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-    const rows = await db.select().from(projects).where(where).orderBy(desc(projects.createdAt)).limit(2000);
+    let rows = await listAll<Project>("projects");
+    if (stage) rows = rows.filter(r => r.stage === stage);
+    if (typeOfSetup) rows = rows.filter(r => r.typeOfSetup === typeOfSetup);
+    rows = filterBySearch(rows, search, ["name", "customerName", "address", "sizeOfSetup", "typeOfSetup", "description", "notes"]);
+    rows = sortByCreatedAtDesc(rows).slice(0, 2000);
 
     // Get payment data
-    const projectIds = rows.map(r => r.id);
-    let paymentsMap: Record<number, number> = {};
-    if (projectIds.length > 0) {
-      const payments = await db.select({ projectId: projectPayments.projectId, total: sql<string>`COALESCE(SUM(${projectPayments.amount}), 0)` }).from(projectPayments).where(inArray(projectPayments.projectId, projectIds)).groupBy(projectPayments.projectId);
-      for (const p of payments) paymentsMap[p.projectId] = parseFloat(p.total || "0");
+    const projectIds = new Set(rows.map(r => r.id));
+    const paymentsMap: Record<number, number> = {};
+    if (projectIds.size > 0) {
+      const payments = await listAll<ProjectPayment>("project_payments");
+      for (const p of payments) {
+        if (!projectIds.has(p.projectId)) continue;
+        paymentsMap[p.projectId] = (paymentsMap[p.projectId] || 0) + Number(p.amount || 0);
+      }
     }
 
     const columns = [

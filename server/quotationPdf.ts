@@ -1,20 +1,13 @@
 import { Router } from "express";
-import { getDb } from "./db";
-import { quotations, quotationItems, accounts } from "../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { getById, listAll } from "./firestore";
+import type { Quotation, QuotationItem, Account } from "./models";
 
 const router = Router();
 
 router.get("/api/quotations/:id/pdf", async (req, res) => {
   try {
-    const db = await getDb();
-    if (!db) {
-      res.status(500).json({ error: "Database unavailable" });
-      return;
-    }
-
     const id = parseInt(req.params.id);
-    const [quotation] = await db.select().from(quotations).where(eq(quotations.id, id)).limit(1);
+    const quotation = await getById<Quotation>("quotations", id);
     if (!quotation) {
       res.status(404).json({ error: "Quotation not found" });
       return;
@@ -23,11 +16,13 @@ router.get("/api/quotations/:id/pdf", async (req, res) => {
     // Get account name if linked
     let accountName = "";
     if (quotation.accountId) {
-      const [acct] = await db.select({ name: accounts.name }).from(accounts).where(eq(accounts.id, quotation.accountId)).limit(1);
+      const acct = await getById<Account>("accounts", quotation.accountId);
       accountName = acct?.name || "";
     }
 
-    const items = await db.select().from(quotationItems).where(eq(quotationItems.quotationId, id));
+    const items = await listAll<QuotationItem>("quotation_items", {
+      where: [["quotationId", "==", id]],
+    });
 
     const html = generateQuotationHtml({ ...quotation, accountName }, items);
     
