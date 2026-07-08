@@ -47,9 +47,11 @@ export default function PurchaseOrderDetail() {
   const poId = parseInt(params.id || "0");
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState("");
   const utils = trpc.useUtils();
 
   const { data: po, isLoading } = trpc.purchaseOrders.get.useQuery({ id: poId }, { enabled: poId > 0 });
+  const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
 
   const updateMutation = trpc.purchaseOrders.update.useMutation({
     onSuccess: () => { toast.success("PO updated"); utils.purchaseOrders.get.invalidate({ id: poId }); setStatusDialogOpen(false); },
@@ -57,7 +59,7 @@ export default function PurchaseOrderDetail() {
   });
 
   const addPaymentMutation = trpc.purchaseOrders.addPayment.useMutation({
-    onSuccess: () => { toast.success("Payment recorded"); utils.purchaseOrders.get.invalidate({ id: poId }); setPaymentDialogOpen(false); },
+    onSuccess: () => { toast.success("Payment recorded"); utils.purchaseOrders.get.invalidate({ id: poId }); setPaymentDialogOpen(false); setPaymentMethod(""); },
     onError: (err: any) => toast.error(err.message),
   });
 
@@ -68,6 +70,7 @@ export default function PurchaseOrderDetail() {
       purchaseOrderId: poId,
       amount: fd.get("amount") as string,
       paymentDate: fd.get("paymentDate") as string,
+      paymentMethod: paymentMethod || undefined,
       reference: (fd.get("reference") as string) || undefined,
       notes: (fd.get("notes") as string) || undefined,
     });
@@ -178,6 +181,17 @@ export default function PurchaseOrderDetail() {
                   <div>
                     <Label>Payment Date *</Label>
                     <Input name="paymentDate" type="date" required className="bg-input border-border" defaultValue={new Date().toISOString().split("T")[0]} />
+                  </div>
+                  <div>
+                    <Label>Payment Method</Label>
+                    <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                      <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Select method..." /></SelectTrigger>
+                      <SelectContent>
+                        {paymentMethods?.map((m: any) => (
+                          <SelectItem key={m.id} value={m.value}>{m.value}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div>
                     <Label>Reference (Check #, Transfer Ref, etc.)</Label>
@@ -301,6 +315,7 @@ export default function PurchaseOrderDetail() {
                     <tr className="border-b border-border">
                       <th className="text-left p-4 text-sm font-medium text-muted-foreground">Date</th>
                       <th className="text-left p-4 text-sm font-medium text-muted-foreground">Amount</th>
+                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Method</th>
                       <th className="text-left p-4 text-sm font-medium text-muted-foreground">Reference</th>
                       <th className="text-left p-4 text-sm font-medium text-muted-foreground">Notes</th>
                     </tr>
@@ -310,6 +325,7 @@ export default function PurchaseOrderDetail() {
                       <tr key={payment.id} className="border-b border-border/50">
                         <td className="p-4 text-sm text-foreground">{new Date(payment.paymentDate).toLocaleDateString()}</td>
                         <td className="p-4 font-medium text-foreground">₱{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="p-4 text-sm text-muted-foreground">{payment.paymentMethod || "-"}</td>
                         <td className="p-4 text-sm text-muted-foreground">{payment.reference || "-"}</td>
                         <td className="p-4 text-sm text-muted-foreground">{payment.notes || "-"}</td>
                       </tr>
@@ -319,7 +335,7 @@ export default function PurchaseOrderDetail() {
                     <tr className="border-t border-border">
                       <td className="p-4 font-medium text-foreground">Total Paid:</td>
                       <td className="p-4 font-bold text-green-400">₱{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                      <td colSpan={2}></td>
+                      <td colSpan={3}></td>
                     </tr>
                   </tfoot>
                 </table>

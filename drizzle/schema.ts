@@ -162,7 +162,10 @@ export const stockTransactions = mysqlTable("stock_transactions", {
   type: mysqlEnum("type", ["stock_in", "stock_out", "adjustment", "reserved", "unreserved"]).notNull(),
   quantity: int("quantity").notNull(),
   reference: varchar("reference", { length: 200 }),
+  /** Denormalized label of the config_options row, kept for display and legacy rows. */
   purpose: varchar("purpose", { length: 100 }),
+  /** Stable id of the config_options row. Survives admins renaming the label. */
+  purposeOptionId: int("purposeOptionId"),
   purposeRefId: int("purposeRefId"),
   purposeRefName: varchar("purposeRefName", { length: 200 }),
   accountId: int("accountId"),
@@ -229,6 +232,7 @@ export const poPayments = mysqlTable("po_payments", {
   purchaseOrderId: int("purchaseOrderId").notNull(),
   amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
   paymentDate: timestamp("paymentDate").notNull(),
+  paymentMethod: varchar("paymentMethod", { length: 100 }),
   reference: varchar("reference", { length: 200 }),
   notes: text("notes"),
   createdBy: int("createdBy"),

@@ -90,6 +90,7 @@ export default function Settings() {
             <TabsTrigger value="project_types">Project Setup Types</TabsTrigger>
             <TabsTrigger value="labor_desc">Labor Descriptions</TabsTrigger>
             <TabsTrigger value="vat_rates">VAT Rates</TabsTrigger>
+            <TabsTrigger value="payment_methods">Payment Methods</TabsTrigger>
           </TabsList>
 
           <TabsContent value="units" className="mt-4">
@@ -134,6 +135,13 @@ export default function Settings() {
               category="vat_rate"
               title="VAT / Tax Rates"
               description="Define the available VAT/tax rate percentages for quotations (e.g., 12, 5, 0). Enter the numeric value only."
+            />
+          </TabsContent>
+          <TabsContent value="payment_methods" className="mt-4">
+            <OptionManager
+              category="payment_method"
+              title="Payment Methods"
+              description="Define the available payment methods for purchase order, project, and net metering payments (e.g., Cash, Check, Bank Transfer)."
             />
           </TabsContent>
         </Tabs>

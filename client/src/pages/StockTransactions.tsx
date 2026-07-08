@@ -22,7 +22,10 @@ const typeColors: Record<string, string> = {
 export default function StockTransactions() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [txType, setTxType] = useState("stock_in");
-  const [purpose, setPurpose] = useState("");
+  // Keyed on the config_options row id, never its label — admins can rename or
+  // delete a purpose in Settings without silently breaking this form.
+  const [purposeOptionId, setPurposeOptionId] = useState("");
+  const [opportunityId, setOpportunityId] = useState("");
   const [purposeRefName, setPurposeRefName] = useState("");
   const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>();
   const [selectedAccountName, setSelectedAccountName] = useState("");
@@ -34,16 +37,23 @@ export default function StockTransactions() {
   const { data: items } = trpc.inventory.listAll.useQuery();
   const { data: purposeOptions } = trpc.config.getOptions.useQuery({ category: "withdrawal_purpose" });
   const { data: opportunities } = trpc.opportunities.list.useQuery({ search: "" });
-  const { data: contactsData } = trpc.contacts.list.useQuery({ search: "", limit: 500 });
-  const contacts = contactsData?.items;
   const { data: accountsList } = trpc.accounts.listAll.useQuery();
   const filteredAccounts = useMemo(() => {
     if (!accountsList || accountSearch.length < 1) return accountsList || [];
     return accountsList.filter((a: any) => a.name.toLowerCase().includes(accountSearch.toLowerCase()));
   }, [accountsList, accountSearch]);
 
+  const resetStockOutFields = () => {
+    setPurposeOptionId("");
+    setOpportunityId("");
+    setPurposeRefName("");
+    setSelectedAccountId(undefined);
+    setSelectedAccountName("");
+    setAccountSearch("");
+  };
+
   const createMutation = trpc.stockTransactions.create.useMutation({
-    onSuccess: () => { toast.success("Transaction recorded"); setIsCreateOpen(false); setTxType("stock_in"); setPurpose(""); setPurposeRefName(""); utils.stockTransactions.list.invalidate(); utils.inventory.list.invalidate(); },
+    onSuccess: () => { toast.success("Transaction recorded"); setIsCreateOpen(false); setTxType("stock_in"); resetStockOutFields(); utils.stockTransactions.list.invalidate(); utils.inventory.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
 
@@ -58,25 +68,26 @@ export default function StockTransactions() {
       reference: (fd.get("reference") as string) || undefined,
       notes: (fd.get("notes") as string) || undefined,
     };
-    if (type === "stock_out" && purpose) {
-      payload.purpose = purpose;
-      payload.purposeRefName = purposeRefName || undefined;
-      // Link to the actual record ID
-      if (purpose === "Project" && purposeRefName) {
-        const matchedOpp = opportunities?.find((o: any) => o.title === purposeRefName);
-        if (matchedOpp) payload.purposeRefId = matchedOpp.id;
-      } else if (purpose === "Customer Order" && purposeRefName) {
-        const matchedContact = contacts?.find((c: any) => `${c.firstName} ${c.lastName}` === purposeRefName);
-        if (matchedContact) payload.purposeRefId = matchedContact.id;
+    if (type === "stock_out" && purposeOptionId) {
+      const option = purposeOptions?.find((o: any) => String(o.id) === purposeOptionId);
+      payload.purposeOptionId = parseInt(purposeOptionId);
+      payload.purpose = option?.value;
+
+      // An opportunity link wins over free-text details — both would write purposeRefName.
+      const linkedOpp = opportunities?.find((o: any) => String(o.id) === opportunityId);
+      if (linkedOpp) {
+        payload.purposeRefId = linkedOpp.id;
+        payload.purposeRefName = linkedOpp.title;
+      } else if (purposeRefName) {
+        payload.purposeRefName = purposeRefName;
       }
-      // Link to business account if selected
+
       if (selectedAccountId) {
         payload.accountId = selectedAccountId;
         payload.accountName = selectedAccountName;
       }
     }
     createMutation.mutate(payload);
-    setSelectedAccountId(undefined); setSelectedAccountName(""); setAccountSearch("");
   };
 
   return (
@@ -87,7 +98,7 @@ export default function StockTransactions() {
             <h1 className="text-2xl font-bold text-foreground">Stock Transactions</h1>
             <p className="text-muted-foreground mt-1">Track stock-in, stock-out, and adjustments.</p>
           </div>
-          <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) { setTxType("stock_in"); setPurpose(""); setPurposeRefName(""); } }}>
+          <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) { setTxType("stock_in"); resetStockOutFields(); } }}>
             <DialogTrigger asChild>
               <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> Record Transaction</Button>
             </DialogTrigger>
@@ -119,43 +130,36 @@ export default function StockTransactions() {
                   <div className="space-y-4 p-3 rounded-md border border-border/50 bg-muted/20">
                     <div>
                       <Label>Purpose of Withdrawal *</Label>
-                      <select value={purpose} onChange={(e) => { setPurpose(e.target.value); setPurposeRefName(""); }} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                      <select value={purposeOptionId} onChange={(e) => setPurposeOptionId(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
                         <option value="">Select purpose...</option>
                         {purposeOptions?.map((opt: any) => (
-                          <option key={opt.id} value={opt.value}>{opt.value}</option>
+                          <option key={opt.id} value={String(opt.id)}>{opt.value}</option>
                         ))}
                       </select>
                     </div>
 
-                    {(purpose === "Project" || purpose === "Customer Order") && (
-                      <div>
-                        <Label>{purpose === "Project" ? "Project / Opportunity" : "Customer Name"}</Label>
-                        {purpose === "Project" ? (
-                          <select value={purposeRefName} onChange={(e) => setPurposeRefName(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                            <option value="">Select project...</option>
+                    {purposeOptionId && (
+                      <>
+                        <div>
+                          <Label>Link to Project / Opportunity (optional)</Label>
+                          <select value={opportunityId} onChange={(e) => { setOpportunityId(e.target.value); if (e.target.value) setPurposeRefName(""); }} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                            <option value="">-- None --</option>
                             {opportunities?.map((opp: any) => (
-                              <option key={opp.id} value={opp.title}>{opp.title}</option>
+                              <option key={opp.id} value={String(opp.id)}>{opp.title}</option>
                             ))}
                           </select>
-                        ) : (
-                          <select value={purposeRefName} onChange={(e) => setPurposeRefName(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                            <option value="">Select customer...</option>
-                            {contacts?.map((c: any) => (
-                              <option key={c.id} value={`${c.firstName} ${c.lastName}`}>{c.firstName} {c.lastName}</option>
-                            ))}
-                          </select>
+                        </div>
+
+                        {!opportunityId && (
+                          <div>
+                            <Label>Additional Details</Label>
+                            <Input value={purposeRefName} onChange={(e) => setPurposeRefName(e.target.value)} placeholder="Optional details..." className="bg-input border-border" />
+                          </div>
                         )}
-                      </div>
+                      </>
                     )}
 
-                    {purpose && purpose !== "Project" && purpose !== "Customer Order" && (
-                      <div>
-                        <Label>Additional Details</Label>
-                        <Input value={purposeRefName} onChange={(e) => setPurposeRefName(e.target.value)} placeholder="Optional details..." className="bg-input border-border" />
-                      </div>
-                    )}
-
-                    {/* Business Account Selection */}
+                    {/* Business Account Selection — stock-out may only be attributed to a business account, never an individual contact */}
                     <div>
                       <Label>Business Account (optional)</Label>
                       <div className="relative">

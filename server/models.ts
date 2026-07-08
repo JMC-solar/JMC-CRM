@@ -154,6 +154,7 @@ export interface StockTransaction {
   quantity: number;
   reference: string | null;
   purpose: string | null;
+  purposeOptionId: number | null;
   purposeRefId: number | null;
   purposeRefName: string | null;
   accountId: number | null;
@@ -211,6 +212,7 @@ export interface PoPayment {
   purchaseOrderId: number;
   amount: string;
   paymentDate: Date;
+  paymentMethod: string | null;
   reference: string | null;
   notes: string | null;
   createdBy: number | null;

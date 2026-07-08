@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
 import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText } from "lucide-react";
 import { formatPHP } from "@/lib/utils";
@@ -81,9 +82,14 @@ export default function ProjectDetail() {
   const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
   const [stageNotes, setStageNotes] = useState("");
   const [newStage, setNewStage] = useState("");
+  const [editContact, setEditContact] = useState<ContactOption | null>(null);
+  const [editAddress, setEditAddress] = useState("");
   const utils = trpc.useUtils();
 
   const { data: project, isLoading } = trpc.projects.getById.useQuery({ id: projectId });
+  // Same query key as ContactCombobox uses, so tRPC serves it from cache.
+  const { data: contactsData } = trpc.contacts.list.useQuery({ search: "", page: 1, limit: 500 });
+  const contactOptions = (contactsData?.items ?? []) as unknown as ContactOption[];
   const { data: history } = trpc.projects.getHistory.useQuery({ projectId });
   const { data: setupTypes } = trpc.config.getOptions.useQuery({ category: "project_setup_type" });
   const { data: opportunitiesList } = trpc.opportunities.list.useQuery({ search: undefined, status: undefined });
@@ -104,6 +110,19 @@ export default function ProjectDetail() {
     onError: (err: any) => toast.error(err.message),
   });
 
+  /** Seed the dialog from the project: resolve its linked contact, prefill the address. */
+  const openEditDialog = () => {
+    const linked = project?.contactId ? contactOptions.find((c) => c.id === project.contactId) ?? null : null;
+    setEditContact(linked);
+    setEditAddress(project?.address || "");
+    setIsEditOpen(true);
+  };
+
+  const handleContactChange = (contact: ContactOption | null) => {
+    setEditContact(contact);
+    if (contact) setEditAddress(contact.address || contact.city || "");
+  };
+
   const handleEdit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -113,8 +132,11 @@ export default function ProjectDetail() {
       description: (fd.get("description") as string) || undefined,
       sizeOfSetup: (fd.get("sizeOfSetup") as string) || undefined,
       typeOfSetup: (fd.get("typeOfSetup") as string) || undefined,
-      customerName: (fd.get("customerName") as string) || undefined,
-      address: (fd.get("address") as string) || undefined,
+      contactId: editContact?.id,
+      // No contact picked? Keep whatever free-text name the project already had —
+      // legacy projects predate contactId and must not be blanked on save.
+      customerName: editContact ? contactFullName(editContact) : (project?.customerName || undefined),
+      address: editAddress || undefined,
       startDate: (fd.get("startDate") as string) || undefined,
       targetCompletionDate: (fd.get("targetCompletionDate") as string) || undefined,
       opportunityId: fd.get("opportunityId") ? parseInt(fd.get("opportunityId") as string) : undefined,
@@ -160,7 +182,7 @@ export default function ProjectDetail() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setIsEditOpen(true)} className="border-border">
+            <Button variant="outline" onClick={openEditDialog} className="border-border">
               <Edit className="h-4 w-4 mr-2" /> Edit
             </Button>
             <Button onClick={() => { setNewStage(""); setIsStageDialogOpen(true); }} className="bg-primary text-primary-foreground">
@@ -375,8 +397,23 @@ export default function ProjectDetail() {
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div><Label>Customer Name</Label><Input name="customerName" defaultValue={project.customerName || ""} className="bg-input border-border" /></div>
-                <div><Label>Address / Location</Label><Input name="address" defaultValue={project.address || ""} className="bg-input border-border" /></div>
+                <div>
+                  <Label>Customer Name</Label>
+                  <ContactCombobox
+                    value={editContact}
+                    onChange={handleContactChange}
+                    fallbackLabel={project.customerName}
+                    placeholder="Search contacts..."
+                  />
+                </div>
+                <div>
+                  <Label>Address / Location</Label>
+                  <Input
+                    value={editAddress}
+                    onChange={(e) => setEditAddress(e.target.value)}
+                    className="bg-input border-border"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div><Label>Total Project Amount</Label><Input name="totalProjectAmount" type="number" step="0.01" defaultValue={project.totalProjectAmount || ""} placeholder="0.00" className="bg-input border-border" /></div>

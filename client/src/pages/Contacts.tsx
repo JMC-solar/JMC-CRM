@@ -55,6 +55,7 @@ export default function Contacts() {
       phone: (fd.get("phone") as string) || undefined,
       company: (fd.get("company") as string) || undefined,
       position: (fd.get("position") as string) || undefined,
+      address: (fd.get("address") as string) || undefined,
       city: (fd.get("city") as string) || undefined,
       notes: (fd.get("notes") as string) || undefined,
     });
@@ -71,6 +72,7 @@ export default function Contacts() {
       phone: (fd.get("phone") as string) || undefined,
       company: (fd.get("company") as string) || undefined,
       position: (fd.get("position") as string) || undefined,
+      address: (fd.get("address") as string) || undefined,
       city: (fd.get("city") as string) || undefined,
       notes: (fd.get("notes") as string) || undefined,
     });
@@ -105,6 +107,7 @@ export default function Contacts() {
                   <div><Label>Company</Label><Input name="company" className="bg-input border-border" /></div>
                   <div><Label>Position</Label><Input name="position" className="bg-input border-border" /></div>
                 </div>
+                <div><Label>Address</Label><Input name="address" className="bg-input border-border" /></div>
                 <div><Label>City</Label><Input name="city" className="bg-input border-border" /></div>
                 <div><Label>Notes</Label><Textarea name="notes" className="bg-input border-border" /></div>
                 <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={createMutation.isPending}>
@@ -189,6 +192,7 @@ export default function Contacts() {
                   <div><Label>Company</Label><Input name="company" defaultValue={editingContact.company || ""} className="bg-input border-border" /></div>
                   <div><Label>Position</Label><Input name="position" defaultValue={editingContact.position || ""} className="bg-input border-border" /></div>
                 </div>
+                <div><Label>Address</Label><Input name="address" defaultValue={editingContact.address || ""} className="bg-input border-border" /></div>
                 <div><Label>City</Label><Input name="city" defaultValue={editingContact.city || ""} className="bg-input border-border" /></div>
                 <div><Label>Notes</Label><Textarea name="notes" defaultValue={editingContact.notes || ""} className="bg-input border-border" /></div>
                 <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>

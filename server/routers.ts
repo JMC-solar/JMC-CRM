@@ -268,27 +268,27 @@ export const appRouter = router({
     create: protectedProcedure.input(z.object({
       firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
       phone: z.string().optional(), company: z.string().optional(), position: z.string().optional(),
-      city: z.string().optional(), notes: z.string().optional(),
+      address: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      await fsInsertOne("contacts", {
+      const id = await fsInsertOne("contacts", {
         firstName: input.firstName,
         lastName: input.lastName ?? null,
         email: input.email ?? null,
         phone: input.phone ?? null,
         company: input.company ?? null,
         position: input.position ?? null,
-        address: null,
+        address: input.address ?? null,
         city: input.city ?? null,
         notes: input.notes ?? null,
         createdBy: ctx.user.id,
       });
-      await fsAudit(ctx.user.id, ctx.user.name, "create", "contact", undefined, `Created contact: ${input.firstName}`);
-      return { success: true };
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "contact", id, `Created contact: ${input.firstName}`);
+      return { success: true, id };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(), firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
       phone: z.string().optional(), company: z.string().optional(), position: z.string().optional(),
-      city: z.string().optional(), notes: z.string().optional(),
+      address: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input }) => {
       const { id, ...data } = input;
       await fsUpdateOne("contacts", id, data);
@@ -713,7 +713,8 @@ export const appRouter = router({
     create: protectedProcedure.input(z.object({
       itemId: z.number(), type: z.string(), quantity: z.number().min(1),
       reference: z.string().optional(), notes: z.string().optional(),
-      purpose: z.string().optional(), purposeRefId: z.number().optional(), purposeRefName: z.string().optional(),
+      purpose: z.string().optional(), purposeOptionId: z.number().optional(),
+      purposeRefId: z.number().optional(), purposeRefName: z.string().optional(),
       accountId: z.number().optional(), accountName: z.string().optional(),
       sourceLocation: z.string().optional(), destinationLocation: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
@@ -739,6 +740,7 @@ export const appRouter = router({
           id: txnId,
           itemId: input.itemId, type: input.type, quantity: input.quantity,
           reference: input.reference ?? null, purpose: input.purpose ?? null,
+          purposeOptionId: input.purposeOptionId ?? null,
           purposeRefId: input.purposeRefId ?? null, purposeRefName: input.purposeRefName ?? null,
           accountId: input.accountId ?? null, accountName: input.accountName ?? null,
           notes: input.notes ?? null,
@@ -1018,6 +1020,7 @@ export const appRouter = router({
       purchaseOrderId: z.number(),
       amount: z.string().min(1),
       paymentDate: z.string().min(1),
+      paymentMethod: z.string().optional(),
       reference: z.string().optional(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
@@ -1025,6 +1028,7 @@ export const appRouter = router({
         purchaseOrderId: input.purchaseOrderId,
         amount: input.amount,
         paymentDate: new Date(input.paymentDate),
+        paymentMethod: input.paymentMethod ?? null,
         reference: input.reference ?? null,
         notes: input.notes ?? null,
         createdBy: ctx.user.id,
@@ -1040,7 +1044,7 @@ export const appRouter = router({
       if (paidAmount >= totalAmount && totalAmount > 0) paymentStatus = "paid";
       else if (paidAmount > 0) paymentStatus = "partially_paid";
       await fsUpdateOne("purchase_orders", input.purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
-      await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Ref: ${input.reference || 'N/A'}`);
+      await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Method: ${input.paymentMethod || 'N/A'}. Ref: ${input.reference || 'N/A'}`);
       return { success: true };
     }),
 

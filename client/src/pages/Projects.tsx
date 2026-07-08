@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
 import { Plus, Search, FolderKanban, Filter, Eye, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import ExportButtons from "@/components/ExportButtons";
@@ -37,6 +38,8 @@ export default function Projects() {
   const [createdDateTo, setCreatedDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedContact, setSelectedContact] = useState<ContactOption | null>(null);
+  const [address, setAddress] = useState("");
   const [, navigate] = useLocation();
   const utils = trpc.useUtils();
 
@@ -56,13 +59,24 @@ export default function Projects() {
   const { data: quotationsList } = trpc.quotations.list.useQuery();
 
   const createMutation = trpc.projects.create.useMutation({
-    onSuccess: (data) => { toast.success("Project created"); setIsCreateOpen(false); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); navigate(`/projects/${data.id}`); },
+    onSuccess: (data) => { toast.success("Project created"); setIsCreateOpen(false); resetCreateForm(); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); navigate(`/projects/${data.id}`); },
     onError: (err: any) => toast.error(err.message),
   });
   const deleteMutation = trpc.projects.delete.useMutation({
     onSuccess: () => { toast.success("Project deleted"); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+
+  /** Picking a contact locks the customer name and prefills the site address, which stays editable. */
+  const handleContactChange = (contact: ContactOption | null) => {
+    setSelectedContact(contact);
+    setAddress(contact ? contact.address || contact.city || "" : "");
+  };
+
+  const resetCreateForm = () => {
+    setSelectedContact(null);
+    setAddress("");
+  };
 
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -72,8 +86,9 @@ export default function Projects() {
       description: (fd.get("description") as string) || undefined,
       sizeOfSetup: (fd.get("sizeOfSetup") as string) || undefined,
       typeOfSetup: (fd.get("typeOfSetup") as string) || undefined,
-      customerName: (fd.get("customerName") as string) || undefined,
-      address: (fd.get("address") as string) || undefined,
+      contactId: selectedContact?.id,
+      customerName: selectedContact ? contactFullName(selectedContact) : undefined,
+      address: address || undefined,
       stage: (fd.get("stage") as string) || "procurement",
       startDate: (fd.get("startDate") as string) || undefined,
       targetCompletionDate: (fd.get("targetCompletionDate") as string) || undefined,
@@ -104,7 +119,7 @@ export default function Projects() {
           </div>
           <div className="flex items-center gap-2">
             <ExportButtons module="projects" params={{ search: search || undefined, stage: stageFilter || undefined, typeOfSetup: typeFilter || undefined }} />
-            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) resetCreateForm(); }}>
               <DialogTrigger asChild>
                 <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> New Project</Button>
               </DialogTrigger>
@@ -131,8 +146,19 @@ export default function Projects() {
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <div><Label>Customer Name</Label><Input name="customerName" className="bg-input border-border" /></div>
-                  <div><Label>Address / Location</Label><Input name="address" className="bg-input border-border" /></div>
+                  <div>
+                    <Label>Customer Name</Label>
+                    <ContactCombobox value={selectedContact} onChange={handleContactChange} placeholder="Search contacts..." />
+                  </div>
+                  <div>
+                    <Label>Address / Location</Label>
+                    <Input
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                      placeholder={selectedContact ? "No address on contact" : "Select a customer first"}
+                      className="bg-input border-border"
+                    />
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
