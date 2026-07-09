@@ -1,6 +1,8 @@
 # Dependencies
 **/node_modules
 .pnpm-store/
+# project uses pnpm — npm's lockfile shouldn't be committed
+package-lock.json
 
 # Build outputs
 dist/
