@@ -323,7 +323,7 @@ export const appRouter = router({
       name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
       email: z.string().optional(), website: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      await fsInsertOne("accounts", {
+      const id = await fsInsertOne("accounts", {
         name: input.name,
         industry: input.industry ?? null,
         phone: input.phone ?? null,
@@ -334,8 +334,8 @@ export const appRouter = router({
         notes: input.notes ?? null,
         createdBy: ctx.user.id,
       });
-      await fsAudit(ctx.user.id, ctx.user.name, "create", "account", undefined, `Created account: ${input.name}`);
-      return { success: true };
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "account", id, `Created account: ${input.name}`);
+      return { success: true, id };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(), name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
@@ -716,6 +716,7 @@ export const appRouter = router({
       purpose: z.string().optional(), purposeOptionId: z.number().optional(),
       purposeRefId: z.number().optional(), purposeRefName: z.string().optional(),
       accountId: z.number().optional(), accountName: z.string().optional(),
+      contactId: z.number().optional(), contactName: z.string().optional(),
       sourceLocation: z.string().optional(), destinationLocation: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
       // Only admin can do adjustments directly
@@ -743,6 +744,7 @@ export const appRouter = router({
           purposeOptionId: input.purposeOptionId ?? null,
           purposeRefId: input.purposeRefId ?? null, purposeRefName: input.purposeRefName ?? null,
           accountId: input.accountId ?? null, accountName: input.accountName ?? null,
+          contactId: input.contactId ?? null, contactName: input.contactName ?? null,
           notes: input.notes ?? null,
           createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown',
           createdAt: now,
@@ -757,7 +759,8 @@ export const appRouter = router({
         }
 
         // Write to inventory audit log
-        const auditPurpose = input.purpose ? (input.accountName ? `${input.purpose} [Account: ${input.accountName}]` : input.purpose) : (input.accountName ? `Account: ${input.accountName}` : null);
+        const attribution = input.accountName ? `Account: ${input.accountName}` : (input.contactName ? `Contact: ${input.contactName}` : null);
+        const auditPurpose = input.purpose ? (attribution ? `${input.purpose} [${attribution}]` : input.purpose) : attribution;
         tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
           id: auditId,
           itemId: input.itemId, itemName: item?.name || null, itemSku: item?.sku || null,
@@ -794,12 +797,14 @@ export const appRouter = router({
           itemId: input.itemId, type: 'stock_out', quantity: input.quantity,
           reference, purpose: 'Warehouse Transfer', notes: input.notes ?? null,
           purposeRefId: null, purposeRefName: null, accountId: null, accountName: null,
+          contactId: null, contactName: null,
           createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown', createdAt: now,
         },
         {
           itemId: input.itemId, type: 'stock_in', quantity: input.quantity,
           reference, purpose: 'Warehouse Transfer', notes: input.notes ?? null,
           purposeRefId: null, purposeRefName: null, accountId: null, accountName: null,
+          contactId: null, contactName: null,
           createdBy: ctx.user.id, createdByName: ctx.user.name || 'Unknown', createdAt: now,
         },
       ]);

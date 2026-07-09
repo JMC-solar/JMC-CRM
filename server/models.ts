@@ -159,6 +159,8 @@ export interface StockTransaction {
   purposeRefName: string | null;
   accountId: number | null;
   accountName: string | null;
+  contactId: number | null;
+  contactName: string | null;
   notes: string | null;
   createdBy: number | null;
   createdByName: string | null;
