@@ -45,11 +45,13 @@ import {
   ArrowRightLeft,
   ClipboardList,
   Wallet,
+  Banknote,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { Button } from "./ui/button";
+import NotificationBell from "./NotificationBell";
 
 const menuSections = [
   {
@@ -96,6 +98,12 @@ const menuSections = [
     items: [
       { icon: FileText, label: "Quotations", path: "/quotations" },
       { icon: FileText, label: "Special Quotations", path: "/special-quotations" },
+    ],
+  },
+  {
+    title: "Finance",
+    items: [
+      { icon: Banknote, label: "Cash Requests", path: "/cash-requests" },
     ],
   },
   {
@@ -233,8 +241,8 @@ function DashboardLayoutContent({
     if (isLimitedRole) {
       return section.title === "Inventory";
     }
-    // Admin section only visible to admin and subadmin
-    if (section.title === "Admin" && userRole !== "admin" && userRole !== "subadmin") return false;
+    // Admin and Finance sections only visible to admin and subadmin
+    if ((section.title === "Admin" || section.title === "Finance") && userRole !== "admin" && userRole !== "subadmin") return false;
     // SubAdmin can see User Management but not Settings
     return true;
   }).map((section) => {
@@ -380,6 +388,9 @@ function DashboardLayoutContent({
             </div>
           </div>
         )}
+        <div className="flex justify-end items-center h-12 px-4 border-b border-border/50 bg-background/95">
+          <NotificationBell />
+        </div>
         <main className="flex-1 p-6">{children}</main>
       </SidebarInset>
     </>

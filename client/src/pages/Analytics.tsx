@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area } from "recharts";
 
 const COLORS = ["#4A7CC9", "#7BB3E0", "#1B2A4A", "#60A5FA", "#34D399", "#F87171"];
 
@@ -18,6 +18,7 @@ export default function Analytics() {
   const { data: poBySupplier } = trpc.purchaseOrders.analyticsBySupplier.useQuery();
   const { data: poOutstanding } = trpc.purchaseOrders.analyticsOutstanding.useQuery();
   const { data: paymentAnalytics } = trpc.projects.paymentAnalytics.useQuery();
+  const { data: cashRequestAnalytics } = trpc.cashRequests.analytics.useQuery();
 
   return (
     <DashboardLayout>
@@ -254,6 +255,31 @@ export default function Analytics() {
             </CardContent>
           </Card>
         )}
+
+        {/* Cash Requests Analytics */}
+        <Card className="bg-card border-border">
+          <CardHeader>
+            <CardTitle className="text-foreground text-base">Cash Requests by Purpose</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {cashRequestAnalytics && cashRequestAnalytics.rows.length > 0 ? (
+              <ResponsiveContainer width="100%" height={250}>
+                <BarChart data={cashRequestAnalytics.rows}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="month" stroke="#94a3b8" fontSize={12} />
+                  <YAxis stroke="#94a3b8" fontSize={12} tickFormatter={(v) => `₱${(v / 1000).toFixed(0)}k`} />
+                  <Tooltip shared={false} contentStyle={{ backgroundColor: "#1e293b", border: "1px solid #334155", color: "#f1f5f9" }} formatter={(value: any, name: any) => [`₱${Number(value).toLocaleString()}`, name]} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {cashRequestAnalytics.purposes.map((purpose: string, index: number) => (
+                    <Bar key={purpose} dataKey={purpose} fill={COLORS[index % COLORS.length]} radius={[4, 4, 0, 0]} />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-[250px] flex items-center justify-center text-muted-foreground">No cash request data yet</div>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </DashboardLayout>
   );

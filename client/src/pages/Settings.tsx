@@ -91,6 +91,7 @@ export default function Settings() {
             <TabsTrigger value="labor_desc">Labor Descriptions</TabsTrigger>
             <TabsTrigger value="vat_rates">VAT Rates</TabsTrigger>
             <TabsTrigger value="payment_methods">Payment Methods</TabsTrigger>
+            <TabsTrigger value="cash_request_purposes">Cash Request Purposes</TabsTrigger>
           </TabsList>
 
           <TabsContent value="units" className="mt-4">
@@ -142,6 +143,13 @@ export default function Settings() {
               category="payment_method"
               title="Payment Methods"
               description="Define the available payment methods for purchase order, project, and net metering payments (e.g., Cash, Check, Bank Transfer)."
+            />
+          </TabsContent>
+          <TabsContent value="cash_request_purposes" className="mt-4">
+            <OptionManager
+              category="cash_request_purpose"
+              title="Cash Request Purposes"
+              description="Define the available reasons for cash requests (e.g., Truck Gasoline, Office Supplies, Site Materials)."
             />
           </TabsContent>
         </Tabs>

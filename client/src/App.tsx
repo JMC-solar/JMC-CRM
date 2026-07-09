@@ -27,6 +27,7 @@ import Projects from "./pages/Projects";
 import ProjectDetail from "./pages/ProjectDetail";
 import NetMetering from "./pages/NetMetering";
 import StockAdjustments from "./pages/StockAdjustments";
+import CashRequests from "./pages/CashRequests";
 import InventoryAuditLog from "./pages/InventoryAuditLog";
 import WarehouseTransfers from "./pages/WarehouseTransfers";
 import Login from "./pages/Login";
@@ -69,6 +70,7 @@ function Router() {
       <Route path="/special-quotations/:id" component={SpecialQuotationEdit} />
       <Route path="/special-quotation-templates" component={SpecialQuotationTemplates} />
       <Route path="/stock-adjustments" component={StockAdjustments} />
+      <Route path="/cash-requests" component={CashRequests} />
       <Route path="/inventory-audit" component={InventoryAuditLog} />
       <Route path="/warehouse-transfers" component={WarehouseTransfers} />
       <Route path="/settings" component={Settings} />

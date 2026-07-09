@@ -16,6 +16,8 @@ import {
   insertMany as fsInsertMany,
   allocateIds as fsAllocateIds,
   docToData as fsDocToData,
+  docToDataRaw as fsDocToDataRaw,
+  listAllRaw as fsListAllRaw,
   fdb,
   type PaginatedResult,
 } from "./firestore";
@@ -51,6 +53,8 @@ import type {
   NetMeteringPayment,
   SpecialQuotationTemplate,
   SpecialQuotation,
+  CashRequest,
+  Notification,
 } from "./models";
 import { money } from "./models";
 import { z } from "zod";
@@ -2592,6 +2596,200 @@ export const appRouter = router({
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input }) => {
       await fsDeleteOne("special_quotations", input.id);
+      return { success: true };
+    }),
+  }),
+
+  // ============ CASH REQUESTS (Sub-admin requests, admin approves) ============
+  cashRequests: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const filters: [string, WhereFilterOp, any][] = [];
+      if (ctx.user.role !== 'admin') filters.push(["requestedBy", "==", ctx.user.id]);
+      const requests = await fsListAllRaw<CashRequest>("cash_requests", { where: filters });
+      // Ascending by id groups naturally by month then monthSeq (cr-MMNNYYY, fixed-width).
+      return requests.sort((a, b) => a.id.localeCompare(b.id));
+    }),
+
+    // The cr-MMNNYYY number is reserved and the doc written in one atomic transaction,
+    // only at actual submit time — never while the user is just browsing/previewing a
+    // month in the dialog. That way no number is ever burned without a real request
+    // behind it.
+    create: protectedProcedure.input(z.object({
+      isOldRecord: z.boolean(), month: z.number().min(1).max(12).optional(),
+      purposeOptionId: z.number(), amount: z.number().positive(), notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== 'subadmin') throw new Error("Only sub-admin can request cash");
+
+      const purposeOption = await fsGetById<ConfigOption>("config_options", input.purposeOptionId);
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = input.isOldRecord ? (input.month ?? now.getMonth() + 1) : now.getMonth() + 1;
+      if (input.isOldRecord && month > now.getMonth() + 1) throw new Error("Cannot select a future month");
+
+      const monthRef = fdb().collection("counters").doc(`cash_requests_month_${year}-${String(month).padStart(2, "0")}`);
+      const yearRef = fdb().collection("counters").doc(`cash_requests_year_${year}`);
+
+      const id = await fdb().runTransaction(async tx => {
+        const [monthSnap, yearSnap] = await Promise.all([tx.get(monthRef), tx.get(yearRef)]);
+        const monthSeq = monthSnap.exists ? (monthSnap.data()?.next as number) ?? 1 : 1;
+        const yearSeq = yearSnap.exists ? (yearSnap.data()?.next as number) ?? 1 : 1;
+        tx.set(monthRef, { next: monthSeq + 1 }, { merge: true });
+        tx.set(yearRef, { next: yearSeq + 1 }, { merge: true });
+
+        const id = `cr-${String(month).padStart(2, "0")}${String(monthSeq).padStart(2, "0")}${String(yearSeq).padStart(3, "0")}`;
+        // Old/backfilled records log a transaction that already happened — no admin
+        // approval or receipt confirmation makes sense for something already done.
+        tx.set(fdb().collection("cash_requests").doc(id), {
+          id, month, year, monthSeq, yearSeq,
+          purposeOptionId: input.purposeOptionId, purposeLabel: purposeOption?.value ?? "Unknown",
+          amount: money(input.amount), isOldRecord: input.isOldRecord,
+          status: input.isOldRecord ? 'approved' : 'pending', received: input.isOldRecord,
+          requestedBy: ctx.user.id, requestedByName: ctx.user.name || 'Unknown',
+          decidedBy: null, decidedByName: input.isOldRecord ? 'Backfilled record' : null,
+          decidedAt: input.isOldRecord ? now : null, receivedAt: input.isOldRecord ? now : null,
+          notes: input.notes ?? null,
+          createdAt: now, updatedAt: now,
+        });
+        return id;
+      });
+
+      const action = input.isOldRecord ? "Logged" : "Requested";
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "cash_request", id, `${action} ${money(input.amount)} for ${purposeOption?.value ?? 'unknown purpose'} (${id})`);
+
+      const admins = (await listUsersRaw()).filter(u => u.role === 'admin');
+      const message = input.isOldRecord
+        ? `${ctx.user.name || 'A sub-admin'} logged a completed cash request of ${money(input.amount)} for ${purposeOption?.value ?? 'a purpose'} (${id}) — already received.`
+        : `${ctx.user.name || 'A sub-admin'} requested ${money(input.amount)} for ${purposeOption?.value ?? 'a purpose'} (${id})`;
+      await Promise.all(admins.map(a => fsInsertOne("notifications", {
+        userId: a.id, type: "cash_request_created",
+        message, link: "/cash-requests", entityId: id, read: false,
+      })));
+
+      return { success: true, id };
+    }),
+
+    approve: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+      const now = new Date();
+      const reqData = await fdb().runTransaction(async tx => {
+        const ref = fdb().collection("cash_requests").doc(input.id);
+        const snap = await tx.get(ref);
+        if (!snap.exists) throw new Error("Cash request not found or already processed");
+        const data = fsDocToDataRaw<CashRequest>(snap);
+        if (data.status !== 'pending') throw new Error("Cash request not found or already processed");
+        tx.set(ref, { status: 'approved', decidedBy: ctx.user.id, decidedByName: ctx.user.name || 'Admin', decidedAt: now, updatedAt: now }, { merge: true });
+        return data;
+      });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "cash_request", input.id, `Approved cash request ${input.id}`);
+      await fsInsertOne("notifications", {
+        userId: reqData.requestedBy, type: "cash_request_approved",
+        message: `Your cash request ${input.id} (${reqData.purposeLabel}) was approved.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    reject: adminProcedure.input(z.object({ id: z.string(), notes: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found or already processed");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (data.status !== 'pending') throw new Error("Cash request not found or already processed");
+
+      const now = new Date();
+      await ref.set({
+        status: 'rejected', decidedBy: ctx.user.id, decidedByName: ctx.user.name || 'Admin',
+        decidedAt: now, notes: input.notes ?? data.notes, updatedAt: now,
+      }, { merge: true });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "cash_request", input.id, `Rejected cash request ${input.id}`);
+      await fsInsertOne("notifications", {
+        userId: data.requestedBy, type: "cash_request_rejected",
+        message: `Your cash request ${input.id} (${data.purposeLabel}) was rejected.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    markReceived: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (data.requestedBy !== ctx.user.id) throw new Error("Only the requester can mark this received");
+      if (data.status !== 'approved' || data.received) throw new Error("Cash request is not awaiting receipt");
+
+      const now = new Date();
+      await ref.set({ received: true, receivedAt: now, updatedAt: now }, { merge: true });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "receive", "cash_request", input.id, `Marked cash request ${input.id} as received`);
+      if (data.decidedBy) {
+        await fsInsertOne("notifications", {
+          userId: data.decidedBy, type: "cash_request_received",
+          message: `${ctx.user.name || 'Sub-admin'} marked cash request ${input.id} (${data.purposeLabel}) as received.`,
+          link: "/cash-requests", entityId: input.id, read: false,
+        });
+      }
+      return { success: true };
+    }),
+
+    // Spend-by-purpose over time, for the Analytics page line chart.
+    analytics: protectedProcedure.query(async ({ ctx }) => {
+      const filters: [string, WhereFilterOp, any][] = [["status", "==", "approved"]];
+      if (ctx.user.role !== 'admin') filters.push(["requestedBy", "==", ctx.user.id]);
+      const [requests, purposeOptions] = await Promise.all([
+        fsListAllRaw<CashRequest>("cash_requests", { where: filters }),
+        fsListAll<ConfigOption>("config_options", { where: [["category", "==", "cash_request_purpose"], ["isActive", "==", 1]] }),
+      ]);
+
+      const purposes = purposeOptions
+        .slice()
+        .sort((a, b) => (a.sortOrder ?? -Infinity) - (b.sortOrder ?? -Infinity))
+        .map(o => o.value);
+
+      const byMonth = new Map<string, Record<string, number>>();
+      for (const r of requests) {
+        const key = `${r.year}-${String(r.month).padStart(2, "0")}`;
+        const row = byMonth.get(key) ?? {};
+        row[r.purposeLabel] = (row[r.purposeLabel] ?? 0) + Number(r.amount);
+        byMonth.set(key, row);
+      }
+
+      const rows = Array.from(byMonth.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, values]) => {
+          const row: Record<string, number | string> = { month };
+          for (const label of purposes) row[label] = values[label] ?? 0;
+          return row;
+        });
+
+      return { rows, purposes };
+    }),
+  }),
+
+  // ============ NOTIFICATIONS ============
+  notifications: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const all = await fsListAll<Notification>("notifications", { where: [["userId", "==", ctx.user.id]] });
+      return all.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()).slice(0, 50);
+    }),
+    unreadCount: protectedProcedure.query(async ({ ctx }) => {
+      const unread = await fsListAll<Notification>("notifications", {
+        where: [["userId", "==", ctx.user.id], ["read", "==", false]],
+      });
+      return unread.length;
+    }),
+    markRead: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const n = await fsGetById<Notification>("notifications", input.id);
+      if (!n || n.userId !== ctx.user.id) throw new Error("Notification not found");
+      await fsUpdateOne("notifications", input.id, { read: true });
+      return { success: true };
+    }),
+    markAllRead: protectedProcedure.mutation(async ({ ctx }) => {
+      const unread = await fsListAll<Notification>("notifications", {
+        where: [["userId", "==", ctx.user.id], ["read", "==", false]],
+      });
+      await Promise.all(unread.map(n => fsUpdateOne("notifications", n.id, { read: true })));
       return { success: true };
     }),
   }),

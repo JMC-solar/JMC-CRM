@@ -117,6 +117,37 @@ export async function getById<T>(coll: string, id: number): Promise<T | undefine
   return docToData<T>(snap);
 }
 
+/**
+ * Like docToData, but for collections whose doc id is a custom string
+ * (e.g. cash_requests' "cr-0701053") rather than the numeric id docToData
+ * parses from snap.id. The id must already be present as a field in the
+ * stored data (write it yourself when inserting).
+ */
+export function docToDataRaw<T>(
+  snap: FirebaseFirestore.DocumentSnapshot | FirebaseFirestore.QueryDocumentSnapshot
+): T {
+  return convertTimestamps(snap.data() ?? {}) as T;
+}
+
+/** Like listAll, but for collections whose doc id is a custom string (see docToDataRaw). */
+export async function listAllRaw<T>(
+  coll: string,
+  opts?: {
+    where?: [string, WhereFilterOp, any][];
+    select?: string[];
+  }
+): Promise<T[]> {
+  let query: FirebaseFirestore.Query = fdb().collection(coll);
+  for (const [field, op, value] of opts?.where ?? []) {
+    query = query.where(field, op, value);
+  }
+  if (opts?.select && opts.select.length > 0) {
+    query = query.select(...opts.select);
+  }
+  const snap = await query.get();
+  return snap.docs.map(d => docToDataRaw<T>(d));
+}
+
 export async function listAll<T>(
   coll: string,
   opts?: {
@@ -298,7 +329,7 @@ export async function audit(
   userName: string | null | undefined,
   action: string,
   entityType: string,
-  entityId?: number | null,
+  entityId?: number | string | null,
   details?: string | null
 ): Promise<void> {
   await insertOne("audit_logs", {

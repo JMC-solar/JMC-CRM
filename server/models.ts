@@ -610,3 +610,39 @@ export interface ItemPriceHistory {
 export function money(n: number): string {
   return n.toFixed(2);
 }
+
+// ============ CASH REQUESTS ============
+export interface CashRequest {
+  id: string; // "cr-0701053" — the Firestore doc id itself, not a numeric surrogate
+  month: number; // 1-12, month this request is attributed to
+  year: number;
+  monthSeq: number; // per-month counter value
+  yearSeq: number; // running yearly counter value
+  purposeOptionId: number; // config_options row id, category "cash_request_purpose"
+  purposeLabel: string; // denormalized at request time
+  amount: string;
+  isOldRecord: boolean;
+  status: "pending" | "approved" | "rejected";
+  received: boolean;
+  requestedBy: number;
+  requestedByName: string;
+  decidedBy: number | null;
+  decidedByName: string | null;
+  decidedAt: Date | null;
+  receivedAt: Date | null;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ NOTIFICATIONS ============
+export interface Notification {
+  id: number;
+  userId: number;
+  type: "cash_request_created" | "cash_request_approved" | "cash_request_rejected" | "cash_request_received";
+  message: string;
+  link: string | null;
+  entityId: string | null;
+  read: boolean;
+  createdAt: Date;
+}
