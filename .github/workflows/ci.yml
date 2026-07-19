@@ -1,0 +1,40 @@
+name: CI
+
+# Runs automatic checks on every change to the app.
+# Green check = safe to publish. Red X = something needs a look before it goes live.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Type check & tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check (catches broken code references)
+        run: pnpm run check
+
+      - name: Run tests (checks the important logic still works)
+        run: pnpm test
