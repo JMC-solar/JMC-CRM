@@ -46,6 +46,38 @@ const statusLabels: Record<string, string> = {
   cancelled: "PO cancelled by JMC",
 };
 
+type DateParts = { y: number; m: number; d: number };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function todayParts(): DateParts {
+  const t = new Date();
+  return { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() };
+}
+function partsToISO(p: DateParts): string {
+  return `${p.y}-${String(p.m).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+}
+
+/** Month / Day / Year dropdown trio. */
+function DateSelect({ value, onChange }: { value: DateParts; onChange: (v: DateParts) => void }) {
+  const cls = "rounded-md border border-border bg-input px-2 py-2 text-sm text-foreground";
+  const cy = new Date().getFullYear();
+  const years: number[] = [];
+  for (let y = cy - 4; y <= cy + 1; y++) years.push(y);
+  const days = Array.from({ length: 31 }, (_, i) => i + 1);
+  return (
+    <div className="flex gap-2">
+      <select className={cls} value={value.m} onChange={(e) => onChange({ ...value, m: Number(e.target.value) })}>
+        {MONTHS.map((mn, i) => <option key={i} value={i + 1}>{mn}</option>)}
+      </select>
+      <select className={cls} value={value.d} onChange={(e) => onChange({ ...value, d: Number(e.target.value) })}>
+        {days.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <select className={cls} value={value.y} onChange={(e) => onChange({ ...value, y: Number(e.target.value) })}>
+        {years.map((y) => <option key={y} value={y}>{y}</option>)}
+      </select>
+    </div>
+  );
+}
+
 export default function PurchaseOrderDetail() {
   const [, navigate] = useLocation();
   const params = useParams<{ id: string }>();
@@ -53,6 +85,8 @@ export default function PurchaseOrderDetail() {
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("");
+  const [statusDate, setStatusDate] = useState<DateParts>(todayParts());
+  const [deliveryDate, setDeliveryDate] = useState<DateParts>(todayParts());
   const utils = trpc.useUtils();
 
   const { data: po, isLoading } = trpc.purchaseOrders.get.useQuery({ id: poId }, { enabled: poId > 0 });
@@ -88,6 +122,8 @@ export default function PurchaseOrderDetail() {
       id: poId,
       status: (fd.get("status") as string) || undefined,
       deliveryStatus: (fd.get("deliveryStatus") as string) || undefined,
+      statusDate: partsToISO(statusDate),
+      deliveryDate: partsToISO(deliveryDate),
     });
   };
 
@@ -154,12 +190,22 @@ export default function PurchaseOrderDetail() {
                   </select>
                 </div>
                 <div>
+                  <Label>Status Date</Label>
+                  <DateSelect value={statusDate} onChange={setStatusDate} />
+                  <p className="text-xs text-muted-foreground mt-1">Recorded only when the order status changes.</p>
+                </div>
+                <div>
                   <Label>Delivery Status</Label>
                   <select name="deliveryStatus" defaultValue={po.deliveryStatus} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
                     <option value="not_delivered">Not Delivered</option>
                     <option value="partially_delivered">Partially Delivered</option>
                     <option value="fully_delivered">Fully Delivered</option>
                   </select>
+                </div>
+                <div>
+                  <Label>Delivery Date</Label>
+                  <DateSelect value={deliveryDate} onChange={setDeliveryDate} />
+                  <p className="text-xs text-muted-foreground mt-1">Recorded only when the delivery status changes.</p>
                 </div>
                 <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
                   {updateMutation.isPending ? "Updating..." : "Update Status"}
@@ -238,6 +284,43 @@ export default function PurchaseOrderDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Status History Timeline */}
+      <Card className="bg-card border-border">
+        <CardHeader>
+          <CardTitle className="text-foreground flex items-center gap-2"><Truck className="h-5 w-5" /> Status History</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {(() => {
+            const rows: { label: string; kind: string; date: Date; by?: string }[] = [
+              { label: "PO created", kind: "order", date: new Date(po.createdAt), by: po.createdByName },
+              ...((po.statusHistory ?? []) as any[]).map((h: any) => ({
+                label: h.type === "delivery" ? (deliveryStatusLabels[h.status] ?? h.status) : (statusLabels[h.status] ?? h.status),
+                kind: h.type === "delivery" ? "delivery" : "order",
+                date: new Date(h.eventDate),
+                by: h.changedByName,
+              })),
+            ].sort((a, b) => a.date.getTime() - b.date.getTime());
+            return (
+              <ol className="relative ml-2 border-l border-border">
+                {rows.map((r, i) => (
+                  <li key={i} className="ml-4 pb-5 last:pb-0">
+                    <span className={`absolute -left-[7px] mt-1 h-3 w-3 rounded-full border-2 border-card ${r.kind === "delivery" ? "bg-green-400" : "bg-blue-400"}`} />
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="text-sm font-medium text-foreground">{r.label}</span>
+                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{r.kind}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {r.date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
+                      {r.by ? ` · by ${r.by}` : ""}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            );
+          })()}
+        </CardContent>
+      </Card>
 
       {/* Line Items */}
       <Card className="bg-card border-border">
