@@ -11,11 +11,12 @@ import type {
   NetMeteringPayment,
   NetMetering,
 } from "./models";
+import { requireAuth } from "./_core/requireAuth";
 
 const router = Router();
 
 // Delivery Receipt printable HTML
-router.get("/api/delivery-receipts/:id/print", async (req, res) => {
+router.get("/api/delivery-receipts/:id/print", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const dr = await getById<DeliveryReceipt>("delivery_receipts", id);
@@ -37,7 +38,7 @@ router.get("/api/delivery-receipts/:id/print", async (req, res) => {
 });
 
 // Acknowledgement Receipt printable HTML - Enhanced with full details
-router.get("/api/acknowledgement-receipts/:id/print", async (req, res) => {
+router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const ack = await getById<AcknowledgementReceipt>("acknowledgement_receipts", id);
@@ -601,7 +602,7 @@ function generateAcknowledgementHtml(ack: any, context: {
 }
 
 // Special Quotation printable HTML
-router.get("/api/special-quotations/:id/print", async (req, res) => {
+router.get("/api/special-quotations/:id/print", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const sq = await getById<SpecialQuotation>("special_quotations", id);

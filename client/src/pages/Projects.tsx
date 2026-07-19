@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
-import { Plus, Search, FolderKanban, Filter, Eye, Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Search, FolderKanban, Filter, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import ExportButtons from "@/components/ExportButtons";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -109,255 +108,252 @@ export default function Projects() {
   };
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Project Monitoring</h1>
-            <p className="text-muted-foreground mt-1">Track and manage all solar installation projects.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ExportButtons module="projects" params={{ search: search || undefined, stage: stageFilter || undefined, typeOfSetup: typeFilter || undefined }} />
-            <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) resetCreateForm(); }}>
-              <DialogTrigger asChild>
-                <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> New Project</Button>
-              </DialogTrigger>
-            <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
-              <DialogHeader><DialogTitle className="text-foreground">Create New Project</DialogTitle></DialogHeader>
-              <form onSubmit={handleCreate} className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="col-span-2"><Label>Project Name *</Label><Input name="name" required className="bg-input border-border" /></div>
-                </div>
-                <div><Label>Description</Label><Textarea name="description" className="bg-input border-border" rows={2} /></div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label>Size of Setup</Label>
-                    <Input name="sizeOfSetup" placeholder="e.g., 5 kW, 10 kW, 100 kW" className="bg-input border-border" />
-                  </div>
-                  <div>
-                    <Label>Type of Setup</Label>
-                    <select name="typeOfSetup" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                      <option value="">-- Select Type --</option>
-                      {setupTypes?.map((opt: any) => (
-                        <option key={opt.id} value={opt.value}>{opt.value}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label>Customer Name</Label>
-                    <ContactCombobox value={selectedContact} onChange={handleContactChange} placeholder="Search contacts..." />
-                  </div>
-                  <div>
-                    <Label>Address / Location</Label>
-                    <Input
-                      value={address}
-                      onChange={(e) => setAddress(e.target.value)}
-                      placeholder={selectedContact ? "No address on contact" : "Select a customer first"}
-                      className="bg-input border-border"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label>Initial Stage</Label>
-                    <select name="stage" defaultValue="procurement" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                      {STAGES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <Label>Linked Opportunity</Label>
-                    <select name="opportunityId" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                      <option value="">-- None --</option>
-                      {opportunitiesList?.map((opp: any) => (
-                        <option key={opp.id} value={opp.id}>{opp.title}</option>
-                      ))}
-                    </select>
-                  </div>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Project Monitoring</h1>
+          <p className="text-muted-foreground mt-1">Track and manage all solar installation projects.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <ExportButtons module="projects" params={{ search: search || undefined, stage: stageFilter || undefined, typeOfSetup: typeFilter || undefined }} />
+          <Dialog open={isCreateOpen} onOpenChange={(open) => { setIsCreateOpen(open); if (!open) resetCreateForm(); }}>
+            <DialogTrigger asChild>
+              <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> New Project</Button>
+            </DialogTrigger>
+          <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
+            <DialogHeader><DialogTitle className="text-foreground">Create New Project</DialogTitle></DialogHeader>
+            <form onSubmit={handleCreate} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2"><Label>Project Name *</Label><Input name="name" required className="bg-input border-border" /></div>
+              </div>
+              <div><Label>Description</Label><Textarea name="description" className="bg-input border-border" rows={2} /></div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Size of Setup</Label>
+                  <Input name="sizeOfSetup" placeholder="e.g., 5 kW, 10 kW, 100 kW" className="bg-input border-border" />
                 </div>
                 <div>
-                  <Label>Linked Quotation</Label>
-                  <select name="quotationId" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">-- None --</option>
-                    {quotationsList?.items?.map((q: any) => (
-                      <option key={q.id} value={q.id}>{q.quoteNumber} - {q.customerName || "Unnamed"}</option>
+                  <Label>Type of Setup</Label>
+                  <select name="typeOfSetup" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                    <option value="">-- Select Type --</option>
+                    {setupTypes?.map((opt: any) => (
+                      <option key={opt.id} value={opt.value}>{opt.value}</option>
                     ))}
                   </select>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div><Label>Start Date</Label><Input name="startDate" type="date" className="bg-input border-border" /></div>
-                  <div><Label>Target Completion Date</Label><Input name="targetCompletionDate" type="date" className="bg-input border-border" /></div>
-                </div>
-                <div><Label>Notes</Label><Textarea name="notes" className="bg-input border-border" rows={2} /></div>
-                <Button type="submit" disabled={createMutation.isPending} className="w-full bg-primary text-primary-foreground">
-                  {createMutation.isPending ? "Creating..." : "Create Project"}
-                </Button>
-              </form>
-            </DialogContent>
-            </Dialog>
-          </div>
-        </div>
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-5 gap-4">
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 text-center">
-              <p className="text-2xl font-bold text-foreground">{stats?.total ?? "..."}</p>
-              <p className="text-xs text-muted-foreground mt-1">Total Projects</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 text-center">
-              <p className="text-2xl font-bold text-yellow-400">{stats?.procurement ?? "..."}</p>
-              <p className="text-xs text-muted-foreground mt-1">Procurement</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 text-center">
-              <p className="text-2xl font-bold text-blue-400">{stats?.implementation ?? "..."}</p>
-              <p className="text-xs text-muted-foreground mt-1">Implementation</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 text-center">
-              <p className="text-2xl font-bold text-purple-400">{stats?.ongoing ?? "..."}</p>
-              <p className="text-xs text-muted-foreground mt-1">On-going</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4 text-center">
-              <p className="text-2xl font-bold text-green-400">{stats?.completed ?? "..."}</p>
-              <p className="text-xs text-muted-foreground mt-1">Completed</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Search & Filters */}
-        <Card className="bg-card border-border">
-          <CardContent className="p-4 space-y-4">
-            <div className="flex gap-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by project, customer, address, type, size, date..."
-                  className="pl-10 bg-input border-border"
-                />
               </div>
-              <Button variant="outline" onClick={() => setShowFilters(!showFilters)} className="border-border">
-                <Filter className="h-4 w-4 mr-2" /> Filters {showFilters ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
-              </Button>
-            </div>
-
-            {showFilters && (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-2 border-t border-border/50">
+              <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label className="text-xs">Stage</Label>
-                  <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">All Stages</option>
+                  <Label>Customer Name</Label>
+                  <ContactCombobox value={selectedContact} onChange={handleContactChange} placeholder="Search contacts..." />
+                </div>
+                <div>
+                  <Label>Address / Location</Label>
+                  <Input
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder={selectedContact ? "No address on contact" : "Select a customer first"}
+                    className="bg-input border-border"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Initial Stage</Label>
+                  <select name="stage" defaultValue="procurement" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
                     {STAGES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                   </select>
                 </div>
                 <div>
-                  <Label className="text-xs">Type of Setup</Label>
-                  <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">All Types</option>
-                    {setupTypes?.map((opt: any) => <option key={opt.id} value={opt.value}>{opt.value}</option>)}
+                  <Label>Linked Opportunity</Label>
+                  <select name="opportunityId" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                    <option value="">-- None --</option>
+                    {opportunitiesList?.map((opp: any) => (
+                      <option key={opp.id} value={opp.id}>{opp.title}</option>
+                    ))}
                   </select>
                 </div>
-                <div>
-                  <Label className="text-xs">Size</Label>
-                  <Input value={sizeFilter} onChange={(e) => setSizeFilter(e.target.value)} placeholder="e.g., 5 kW" className="bg-input border-border" />
-                </div>
-                <div>
-                  <Label className="text-xs">Start From</Label>
-                  <Input type="date" value={startDateFrom} onChange={(e) => setStartDateFrom(e.target.value)} className="bg-input border-border" />
-                </div>
-                <div>
-                  <Label className="text-xs">Start To</Label>
-                  <Input type="date" value={startDateTo} onChange={(e) => setStartDateTo(e.target.value)} className="bg-input border-border" />
-                </div>
-                <div>
-                  <Label className="text-xs">Created From</Label>
-                  <Input type="date" value={createdDateFrom} onChange={(e) => setCreatedDateFrom(e.target.value)} className="bg-input border-border" />
-                </div>
-                <div>
-                  <Label className="text-xs">Created To</Label>
-                  <Input type="date" value={createdDateTo} onChange={(e) => setCreatedDateTo(e.target.value)} className="bg-input border-border" />
-                </div>
-                <div className="col-span-full flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={clearFilters} className="text-muted-foreground">Clear Filters</Button>
-                </div>
               </div>
-            )}
+              <div>
+                <Label>Linked Quotation</Label>
+                <select name="quotationId" className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">-- None --</option>
+                  {quotationsList?.items?.map((q: any) => (
+                    <option key={q.id} value={q.id}>{q.quoteNumber} - {q.customerName || "Unnamed"}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div><Label>Start Date</Label><Input name="startDate" type="date" className="bg-input border-border" /></div>
+                <div><Label>Target Completion Date</Label><Input name="targetCompletionDate" type="date" className="bg-input border-border" /></div>
+              </div>
+              <div><Label>Notes</Label><Textarea name="notes" className="bg-input border-border" rows={2} /></div>
+              <Button type="submit" disabled={createMutation.isPending} className="w-full bg-primary text-primary-foreground">
+                {createMutation.isPending ? "Creating..." : "Create Project"}
+              </Button>
+            </form>
+          </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-5 gap-4">
+        <Card className="bg-card border-border">
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-foreground">{stats?.total ?? "..."}</p>
+            <p className="text-xs text-muted-foreground mt-1">Total Projects</p>
           </CardContent>
         </Card>
-
-        {/* Project Table */}
         <Card className="bg-card border-border">
-          <CardContent className="p-0">
-            {isLoading ? (
-              <div className="p-8 text-center text-muted-foreground">Loading projects...</div>
-            ) : !projectList?.length ? (
-              <div className="p-8 text-center text-muted-foreground">
-                <FolderKanban className="h-12 w-12 mx-auto mb-3 opacity-30" />
-                <p>No projects found. Create your first project to get started.</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-border/50">
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Project Name</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Customer</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Type</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Size</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Stage</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Payment</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Location</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Start Date</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {projectList.map((project: any) => (
-                      <tr key={project.id} className="border-b border-border/30 hover:bg-muted/10 cursor-pointer" onClick={() => navigate(`/projects/${project.id}`)}>
-                        <td className="p-4">
-                          <span className="text-foreground font-medium">{project.name}</span>
-                        </td>
-                        <td className="p-4 text-sm text-muted-foreground">{project.customerName || "-"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{project.typeOfSetup || "-"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{project.sizeOfSetup || "-"}</td>
-                        <td className="p-4"><StageBadge stage={project.stage} /></td>
-                        <td className="p-4">
-                          {project.paymentStatus === "fully_paid" ? (
-                            <Badge className="bg-green-500/20 text-green-400 border-green-500/30 border text-xs">Paid</Badge>
-                          ) : project.paymentStatus === "partially_paid" ? (
-                            <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30 border text-xs">Partial</Badge>
-                          ) : (
-                            <Badge className="bg-red-500/20 text-red-400 border-red-500/30 border text-xs">Unpaid</Badge>
-                          )}
-                        </td>
-                        <td className="p-4 text-sm text-muted-foreground max-w-[150px] truncate">{project.address || "-"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{project.startDate ? new Date(project.startDate).toLocaleDateString() : "-"}</td>
-                        <td className="p-4">
-                          <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
-                            <Button variant="ghost" size="sm" onClick={() => navigate(`/projects/${project.id}`)}><Eye className="h-4 w-4" /></Button>
-                            <Button variant="ghost" size="sm" onClick={async () => { if (await confirm("Delete this project?")) deleteMutation.mutate({ id: project.id }); }} className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-yellow-400">{stats?.procurement ?? "..."}</p>
+            <p className="text-xs text-muted-foreground mt-1">Procurement</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-blue-400">{stats?.implementation ?? "..."}</p>
+            <p className="text-xs text-muted-foreground mt-1">Implementation</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-purple-400">{stats?.ongoing ?? "..."}</p>
+            <p className="text-xs text-muted-foreground mt-1">On-going</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4 text-center">
+            <p className="text-2xl font-bold text-green-400">{stats?.completed ?? "..."}</p>
+            <p className="text-xs text-muted-foreground mt-1">Completed</p>
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+
+      {/* Search & Filters */}
+      <Card className="bg-card border-border">
+        <CardContent className="p-4 space-y-4">
+          <div className="flex gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by project, customer, address, type, size, date..."
+                className="pl-10 bg-input border-border"
+              />
+            </div>
+            <Button variant="outline" onClick={() => setShowFilters(!showFilters)} className="border-border">
+              <Filter className="h-4 w-4 mr-2" /> Filters {showFilters ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
+            </Button>
+          </div>
+
+          {showFilters && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-2 border-t border-border/50">
+              <div>
+                <Label className="text-xs">Stage</Label>
+                <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">All Stages</option>
+                  {STAGES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs">Type of Setup</Label>
+                <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">All Types</option>
+                  {setupTypes?.map((opt: any) => <option key={opt.id} value={opt.value}>{opt.value}</option>)}
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs">Size</Label>
+                <Input value={sizeFilter} onChange={(e) => setSizeFilter(e.target.value)} placeholder="e.g., 5 kW" className="bg-input border-border" />
+              </div>
+              <div>
+                <Label className="text-xs">Start From</Label>
+                <Input type="date" value={startDateFrom} onChange={(e) => setStartDateFrom(e.target.value)} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label className="text-xs">Start To</Label>
+                <Input type="date" value={startDateTo} onChange={(e) => setStartDateTo(e.target.value)} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label className="text-xs">Created From</Label>
+                <Input type="date" value={createdDateFrom} onChange={(e) => setCreatedDateFrom(e.target.value)} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label className="text-xs">Created To</Label>
+                <Input type="date" value={createdDateTo} onChange={(e) => setCreatedDateTo(e.target.value)} className="bg-input border-border" />
+              </div>
+              <div className="col-span-full flex justify-end">
+                <Button variant="ghost" size="sm" onClick={clearFilters} className="text-muted-foreground">Clear Filters</Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Project Table */}
+      <Card className="bg-card border-border">
+        <CardContent className="p-0">
+          {isLoading ? (
+            <div className="p-8 text-center text-muted-foreground">Loading projects...</div>
+          ) : !projectList?.length ? (
+            <div className="p-8 text-center text-muted-foreground">
+              <FolderKanban className="h-12 w-12 mx-auto mb-3 opacity-30" />
+              <p>No projects found. Create your first project to get started.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border/50">
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Project Name</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Customer</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Type</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Size</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Stage</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Payment</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Location</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Start Date</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projectList.map((project: any) => (
+                    <tr key={project.id} className="border-b border-border/30 hover:bg-muted/10 cursor-pointer" onClick={() => navigate(`/projects/${project.id}`)}>
+                      <td className="p-4">
+                        <span className="text-foreground font-medium">{project.name}</span>
+                      </td>
+                      <td className="p-4 text-sm text-muted-foreground">{project.customerName || "-"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{project.typeOfSetup || "-"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{project.sizeOfSetup || "-"}</td>
+                      <td className="p-4"><StageBadge stage={project.stage} /></td>
+                      <td className="p-4">
+                        {project.paymentStatus === "fully_paid" ? (
+                          <Badge className="bg-green-500/20 text-green-400 border-green-500/30 border text-xs">Paid</Badge>
+                        ) : project.paymentStatus === "partially_paid" ? (
+                          <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30 border text-xs">Partial</Badge>
+                        ) : (
+                          <Badge className="bg-red-500/20 text-red-400 border-red-500/30 border text-xs">Unpaid</Badge>
+                        )}
+                      </td>
+                      <td className="p-4 text-sm text-muted-foreground max-w-[150px] truncate">{project.address || "-"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{project.startDate ? new Date(project.startDate).toLocaleDateString() : "-"}</td>
+                      <td className="p-4">
+                        <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                          <Button variant="ghost" size="sm" onClick={async () => { if (await confirm("Delete this project?")) deleteMutation.mutate({ id: project.id }); }} className="text-destructive hover:text-destructive"><Trash2 className="h-4 w-4" /></Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

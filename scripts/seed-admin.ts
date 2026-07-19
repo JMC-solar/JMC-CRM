@@ -7,7 +7,7 @@
  * Vercel serverless functions must not perform one-time setup work on cold
  * start.
  */
-import "dotenv/config";
+import "../server/_core/loadEnv";
 import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
 import { getUserByUsername, createUser } from "../server/firestore-users";

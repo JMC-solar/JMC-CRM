@@ -2,17 +2,23 @@
  * Idempotently seeds default config_options rows into Firestore.
  * Run with: pnpm seed:config  (see package.json -> "seed:config")
  *
- * Currently seeds the `payment_method` category, which is read by the
+ * Seeds the `payment_method` category, which is read by the
  * purchase-order, project, and net-metering payment dialogs. Without these
  * rows the Payment Method dropdowns render empty. Admins can add/remove
  * further options at runtime via Settings -> Payment Methods.
+ *
+ * Also seeds the `withdrawal_purpose` category with "Retail Sale", so retail
+ * sale stock-out transactions link to a stable option id instead of falling
+ * back to a bare string. Admins can add/remove further options at runtime
+ * via Settings -> Withdrawal Purposes.
  */
-import "dotenv/config";
+import "../server/_core/loadEnv";
 import { listAll, insertOne } from "../server/firestore";
 import type { ConfigOption } from "../server/models";
 
 const DEFAULTS: Record<string, string[]> = {
   payment_method: ["Cash", "Check", "Bank Transfer"],
+  withdrawal_purpose: ["Retail Sale"],
 };
 
 async function seedConfigOptions(): Promise<void> {

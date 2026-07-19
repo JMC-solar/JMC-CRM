@@ -3,6 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConfirmRoot } from "@/lib/confirm";
 import NotFound from "@/pages/NotFound";
 import { Route, Switch } from "wouter";
+import DashboardLayout from "./components/DashboardLayout";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
@@ -12,6 +13,7 @@ import Contacts from "./pages/Contacts";
 import Accounts from "./pages/Accounts";
 import Opportunities from "./pages/Opportunities";
 import Activities from "./pages/Activities";
+import Retail from "./pages/Retail";
 import Inventory from "./pages/Inventory";
 import StockTransactions from "./pages/StockTransactions";
 import PurchaseOrders from "./pages/PurchaseOrders";
@@ -40,47 +42,63 @@ import SpecialQuotationTemplates from "./pages/SpecialQuotationTemplates";
 import ForgotPassword from "./pages/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword";
 
-function Router() {
+// Routes rendered without the dashboard shell: auth screens and the "/" bootstrap
+// redirect, which resolves to /dashboard or /login before anything is shown.
+function PublicRouter() {
   return (
     <Switch>
       <Route path="/" component={Home} />
-      <Route path="/dashboard" component={Dashboard} />
-      <Route path="/leads" component={Leads} />
-      <Route path="/contacts" component={Contacts} />
-      <Route path="/accounts" component={Accounts} />
-      <Route path="/opportunities" component={Opportunities} />
-      <Route path="/activities" component={Activities} />
-      <Route path="/inventory" component={Inventory} />
-      <Route path="/stock-transactions" component={StockTransactions} />
-      <Route path="/purchase-orders" component={PurchaseOrders} />
-      <Route path="/purchase-orders/new" component={PurchaseOrderCreate} />
-      <Route path="/purchase-orders/:id" component={PurchaseOrderDetail} />
-      <Route path="/suppliers" component={Suppliers} />
-      <Route path="/bom-packages" component={BomPackages} />
-      <Route path="/quotations" component={Quotations} />
-      <Route path="/analytics" component={Analytics} />
-      <Route path="/users" component={UserManagement} />
-      <Route path="/projects" component={Projects} />
-      <Route path="/projects/:id" component={ProjectDetail} />
-      <Route path="/project-payments" component={ProjectPayments} />
-      <Route path="/net-metering" component={NetMetering} />
-      <Route path="/nm-payments" component={NetMeteringPayments} />
-      <Route path="/special-quotations" component={SpecialQuotations} />
-      <Route path="/special-quotations/new" component={SpecialQuotationEdit} />
-      <Route path="/special-quotations/:id" component={SpecialQuotationEdit} />
-      <Route path="/special-quotation-templates" component={SpecialQuotationTemplates} />
-      <Route path="/stock-adjustments" component={StockAdjustments} />
-      <Route path="/cash-requests" component={CashRequests} />
-      <Route path="/inventory-audit" component={InventoryAuditLog} />
-      <Route path="/warehouse-transfers" component={WarehouseTransfers} />
-      <Route path="/settings" component={Settings} />
       <Route path="/login" component={Login} />
       <Route path="/forgot-password" component={ForgotPassword} />
       <Route path="/reset-password" component={ResetPassword} />
-      <Route path="/profile" component={Profile} />
-      <Route path="/404" component={NotFound} />
-      <Route component={NotFound} />
+      <Route component={AppRouter} />
     </Switch>
+  );
+}
+
+// A single DashboardLayout instance wraps every authenticated route so the
+// sidebar is never remounted on navigation (preserves its scroll position) and
+// no page can forget to render the shell.
+function AppRouter() {
+  return (
+    <DashboardLayout>
+      <Switch>
+        <Route path="/dashboard" component={Dashboard} />
+        <Route path="/leads" component={Leads} />
+        <Route path="/contacts" component={Contacts} />
+        <Route path="/accounts" component={Accounts} />
+        <Route path="/opportunities" component={Opportunities} />
+        <Route path="/activities" component={Activities} />
+        <Route path="/retail" component={Retail} />
+        <Route path="/inventory" component={Inventory} />
+        <Route path="/stock-transactions" component={StockTransactions} />
+        <Route path="/purchase-orders" component={PurchaseOrders} />
+        <Route path="/purchase-orders/new" component={PurchaseOrderCreate} />
+        <Route path="/purchase-orders/:id" component={PurchaseOrderDetail} />
+        <Route path="/suppliers" component={Suppliers} />
+        <Route path="/bom-packages" component={BomPackages} />
+        <Route path="/quotations" component={Quotations} />
+        <Route path="/analytics" component={Analytics} />
+        <Route path="/users" component={UserManagement} />
+        <Route path="/projects" component={Projects} />
+        <Route path="/projects/:id" component={ProjectDetail} />
+        <Route path="/project-payments" component={ProjectPayments} />
+        <Route path="/net-metering" component={NetMetering} />
+        <Route path="/nm-payments" component={NetMeteringPayments} />
+        <Route path="/special-quotations" component={SpecialQuotations} />
+        <Route path="/special-quotations/new" component={SpecialQuotationEdit} />
+        <Route path="/special-quotations/:id" component={SpecialQuotationEdit} />
+        <Route path="/special-quotation-templates" component={SpecialQuotationTemplates} />
+        <Route path="/stock-adjustments" component={StockAdjustments} />
+        <Route path="/cash-requests" component={CashRequests} />
+        <Route path="/inventory-audit" component={InventoryAuditLog} />
+        <Route path="/warehouse-transfers" component={WarehouseTransfers} />
+        <Route path="/settings" component={Settings} />
+        <Route path="/profile" component={Profile} />
+        <Route path="/404" component={NotFound} />
+        <Route component={NotFound} />
+      </Switch>
+    </DashboardLayout>
   );
 }
 
@@ -91,7 +109,7 @@ function App() {
         <TooltipProvider>
           <Toaster />
           <ConfirmRoot />
-          <Router />
+          <PublicRouter />
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>

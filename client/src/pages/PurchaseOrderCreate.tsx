@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -255,7 +254,7 @@ export default function PurchaseOrderCreate() {
   };
 
   return (
-    <DashboardLayout>
+    <>
       <div className="space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" onClick={() => navigate("/purchase-orders")}>
@@ -572,6 +571,6 @@ export default function PurchaseOrderCreate() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </DashboardLayout>
+    </>
   );
 }

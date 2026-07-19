@@ -1,11 +1,15 @@
 import type { Express } from "express";
 import { bucket } from "../firestore";
+import { requireAuth } from "./requireAuth";
 
 export function registerStorageProxy(app: Express) {
   // Serve files from /storage/* by redirecting to a short-lived Firebase
   // Storage signed URL. No legacy data predates this app's Firebase Storage
   // adoption, so there is no /manus-storage or local /images fallback.
-  app.get("/storage/*", async (req, res) => {
+  // requireAuth gates the *minting* of the signed URL; the URL itself is
+  // then fetched unauthenticated by the browser, which is fine — Firebase
+  // validates it via its own embedded signature, not our session.
+  app.get("/storage/*", requireAuth, async (req, res) => {
     const key = (req.params as Record<string, string>)[0];
     if (!key) {
       res.status(400).send("Missing storage key");

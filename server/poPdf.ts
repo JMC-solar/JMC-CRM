@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { getById, listAll } from "./firestore";
 import type { PurchaseOrder, PurchaseOrderItem, Supplier } from "./models";
+import { requireAuth } from "./_core/requireAuth";
 
 const router = Router();
 
-router.get("/api/purchase-orders/:id/pdf", async (req, res) => {
+router.get("/api/purchase-orders/:id/pdf", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const po = await getById<PurchaseOrder>("purchase_orders", id);

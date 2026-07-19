@@ -2,6 +2,7 @@ import { Router } from "express";
 import { listAll } from "./firestore";
 import type { Contact, InventoryItem, Quotation, Project, ProjectPayment } from "./models";
 import ExcelJS from "exceljs";
+import { requireAuth } from "./_core/requireAuth";
 
 const router = Router();
 
@@ -32,7 +33,7 @@ function sortByCreatedAtDesc<T extends { createdAt: Date }>(items: T[]): T[] {
 }
 
 // ============ CONTACTS EXPORT ============
-router.get("/api/export/contacts", async (req, res) => {
+router.get("/api/export/contacts", requireAuth, async (req, res) => {
   try {
     const { search, format } = req.query as { search?: string; format?: string };
     let items = await listAll<Contact>("contacts");
@@ -77,7 +78,7 @@ router.get("/api/export/contacts", async (req, res) => {
 });
 
 // ============ INVENTORY EXPORT ============
-router.get("/api/export/inventory", async (req, res) => {
+router.get("/api/export/inventory", requireAuth, async (req, res) => {
   try {
     const { search, category, format } = req.query as { search?: string; category?: string; format?: string };
     let items = await listAll<InventoryItem>("inventory_items");
@@ -129,7 +130,7 @@ router.get("/api/export/inventory", async (req, res) => {
 });
 
 // ============ QUOTATIONS EXPORT ============
-router.get("/api/export/quotations", async (req, res) => {
+router.get("/api/export/quotations", requireAuth, async (req, res) => {
   try {
     const { search, dateFrom, dateTo, format } = req.query as { search?: string; dateFrom?: string; dateTo?: string; format?: string };
     let items = await listAll<Quotation>("quotations");
@@ -182,7 +183,7 @@ router.get("/api/export/quotations", async (req, res) => {
 });
 
 // ============ PROJECTS EXPORT ============
-router.get("/api/export/projects", async (req, res) => {
+router.get("/api/export/projects", requireAuth, async (req, res) => {
   try {
     const { search, stage, typeOfSetup, format } = req.query as { search?: string; stage?: string; typeOfSetup?: string; format?: string };
     let rows = await listAll<Project>("projects");
@@ -253,7 +254,7 @@ router.get("/api/export/projects", async (req, res) => {
 });
 
 // ============ HELPERS ============
-async function generateExcel(sheetName: string, columns: { header: string; key: string }[], rows: Record<string, string>[]) {
+export async function generateExcel(sheetName: string, columns: { header: string; key: string }[], rows: Record<string, string>[]) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "JMC Solar CRM";
   workbook.created = new Date();

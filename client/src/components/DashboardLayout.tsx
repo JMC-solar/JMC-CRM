@@ -46,6 +46,7 @@ import {
   ClipboardList,
   Wallet,
   Banknote,
+  ShoppingBag,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -82,6 +83,12 @@ const menuSections = [
       { icon: ShoppingCart, label: "Purchase Orders", path: "/purchase-orders" },
       { icon: Layers, label: "BOM Packages", path: "/bom-packages" },
       { icon: ClipboardList, label: "Audit Trail", path: "/inventory-audit" },
+    ],
+  },
+  {
+    title: "Retail",
+    items: [
+      { icon: ShoppingBag, label: "Retail Sales", path: "/retail" },
     ],
   },
   {

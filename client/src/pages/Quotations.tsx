@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,12 +8,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { trpc } from "@/lib/trpc";
-import { Plus, Trash2, FileText, ChevronDown, ChevronUp, Wrench, Package, Edit2, Search, Filter, Receipt, FileCheck } from "lucide-react";
+import { Plus, Trash2, FileText, ChevronDown, ChevronUp, Wrench, Package, Edit2, Search, Filter, Receipt, FileCheck, Eye } from "lucide-react";
 import PaginationControls from "@/components/PaginationControls";
 import ExportButtons from "@/components/ExportButtons";
+import DetailDialog from "@/components/DetailDialog";
 import { useState, useMemo, useEffect } from "react";
 import { toast } from "sonner";
 import { confirm } from "@/lib/confirm";
+import { formatPHP } from "@/lib/utils";
 
 const statusColors: Record<string, string> = {
   draft: "bg-gray-500/20 text-gray-400 border-gray-500/30",
@@ -503,6 +504,7 @@ function EditQuotationDialog({ quotationId, open, onOpenChange }: { quotationId:
 export default function Quotations() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingQuoteId, setEditingQuoteId] = useState<number | null>(null);
+  const [viewingQuote, setViewingQuote] = useState<any>(null);
   const [expandedQuote, setExpandedQuote] = useState<number | null>(null);
   const [addingItem, setAddingItem] = useState<number | null>(null);
   const [addingLabor, setAddingLabor] = useState<number | null>(null);
@@ -541,6 +543,10 @@ export default function Quotations() {
     { quotationId: expandedQuote! },
     { enabled: !!expandedQuote }
   );
+  const { data: viewingItems } = trpc.quotations.getItems.useQuery(
+    { quotationId: viewingQuote?.id! },
+    { enabled: !!viewingQuote }
+  );
   const { data: deliveryReceipts } = trpc.quotations.getDeliveryReceipts.useQuery(
     { quotationId: expandedQuote! },
     { enabled: !!expandedQuote }
@@ -568,9 +574,13 @@ export default function Quotations() {
     onError: (err: any) => toast.error(err.message),
   });
   const deleteMutation = trpc.quotations.delete.useMutation({
-    onSuccess: () => { toast.success("Quotation deleted"); utils.quotations.list.invalidate(); },
+    onSuccess: () => { toast.success("Quotation deleted"); setViewingQuote(null); utils.quotations.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+
+  const handleDelete = async (quote: any) => {
+    if (await confirm("Delete this quotation?")) deleteMutation.mutate({ id: quote.id });
+  };
 
   const handleSelectInventoryItem = (itemId: string) => {
     setSelectedInventoryItem(itemId);
@@ -656,291 +666,410 @@ export default function Quotations() {
   };
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Quotations</h1>
-            <p className="text-muted-foreground mt-1">Create and manage project quotations and proposals.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ExportButtons module="quotations" params={{ search: searchFilter || undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined }} />
-            <Button className="bg-primary text-primary-foreground" onClick={() => setIsCreateOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" /> Create Quotation
-            </Button>
-          </div>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Quotations</h1>
+          <p className="text-muted-foreground mt-1">Create and manage project quotations and proposals.</p>
         </div>
+        <div className="flex items-center gap-2">
+          <ExportButtons module="quotations" params={{ search: searchFilter || undefined, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined }} />
+          <Button className="bg-primary text-primary-foreground" onClick={() => setIsCreateOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" /> Create Quotation
+          </Button>
+        </div>
+      </div>
 
-        <CreateQuotationDialog open={isCreateOpen} onOpenChange={setIsCreateOpen} />
-        {editingQuoteId && (
-          <EditQuotationDialog quotationId={editingQuoteId} open={!!editingQuoteId} onOpenChange={(o) => { if (!o) setEditingQuoteId(null); }} />
-        )}
+      <CreateQuotationDialog open={isCreateOpen} onOpenChange={setIsCreateOpen} />
 
-        {/* Search & Filters */}
-        <Card className="bg-card border-border">
-          <CardContent className="p-4 space-y-3">
-            <div className="flex gap-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input value={searchFilter} onChange={(e) => { setSearchFilter(e.target.value); setPage(1); }} placeholder="Search by customer, title, quote#, address, notes, date..." className="pl-10 bg-input border-border" />
-              </div>
-              <Button variant="outline" onClick={() => setShowFilters(!showFilters)} className="border-border">
-                <Filter className="h-4 w-4 mr-2" /> Filters {showFilters ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
-              </Button>
-            </div>
-            {showFilters && (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-3 border-t border-border/50">
-                <div><Label className="text-xs">Address</Label><Input value={addressFilter} onChange={(e) => { setAddressFilter(e.target.value); setPage(1); }} placeholder="Filter by address" className="bg-input border-border" /></div>
-                <div><Label className="text-xs">kW Rating</Label><Input value={kwFilter} onChange={(e) => { setKwFilter(e.target.value); setPage(1); }} placeholder="e.g. 5kW" className="bg-input border-border" /></div>
-                <div><Label className="text-xs">Setup Type</Label><Input value={setupTypeFilter} onChange={(e) => { setSetupTypeFilter(e.target.value); setPage(1); }} placeholder="e.g. On-Grid" className="bg-input border-border" /></div>
-                <div><Label className="text-xs">Date From</Label><Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className="bg-input border-border" /></div>
-                <div><Label className="text-xs">Date To</Label><Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} className="bg-input border-border" /></div>
-                <div className="col-span-full flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={() => { setSearchFilter(""); setAddressFilter(""); setKwFilter(""); setSetupTypeFilter(""); setDateFrom(""); setDateTo(""); setPage(1); }} className="text-muted-foreground">Clear Filters</Button>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Quotations List */}
-        <div className="space-y-4">
-          {isLoading ? (
-            <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">Loading...</CardContent></Card>
-          ) : !quotationsList?.items?.length ? (
-            <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">No quotations yet. Create your first quotation.</CardContent></Card>
-          ) : (
-            quotationsList?.items?.map((q: any) => (
-              <Card key={q.id} className="bg-card border-border">
-                <CardContent className="p-0">
-                  <div className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/30 transition-colors" onClick={() => setExpandedQuote(expandedQuote === q.id ? null : q.id)}>
-                    <div className="flex items-center gap-3">
-                      <FileText className="h-5 w-5 text-primary" />
-                      <div>
-                        <div className="font-medium text-foreground">{q.title}</div>
-                        <div className="text-sm text-muted-foreground">
-                          {q.quoteNumber} {q.customerName ? `• ${q.customerName}` : ""}
-                          {(q as any).accountId ? <Badge variant="outline" className="ml-2 bg-blue-500/20 text-blue-400 border-blue-500/30 text-[10px]">Business Acct</Badge> : null}
-                          {q.vatEnabled ? <Badge variant="outline" className="ml-2 bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]">VAT</Badge> : null}
-                          {(q as any).createdByName && <span className="ml-2 text-xs text-muted-foreground">by {(q as any).createdByName}</span>}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <Badge variant="outline" className={statusColors[q.status]}>{q.status.replace("_", " ")}</Badge>
-                      <div className="text-right">
-                        <div className="font-semibold text-foreground">{q.totalAmount ? `₱${Number(q.totalAmount).toLocaleString()}` : "-"}</div>
-                      </div>
-                      <div className="flex gap-1">
-                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setEditingQuoteId(q.id); }} title="Edit">
-                          <Edit2 className="h-4 w-4 text-blue-400" />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); window.open(`/api/quotations/${q.id}/pdf`, '_blank'); }} title="Download PDF">
-                          <FileText className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleCreateDR(q.id); }} title="Delivery Receipt">
-                          <Receipt className="h-4 w-4 text-amber-400" />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleCreateAck(q.id); }} title="Acknowledgement">
-                          <FileCheck className="h-4 w-4 text-green-400" />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={async (e) => { e.stopPropagation(); if (await confirm("Delete?")) deleteMutation.mutate({ id: q.id }); }} title="Delete">
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </div>
-                      {expandedQuote === q.id ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
-                    </div>
-                  </div>
-
-                  {expandedQuote === q.id && (
-                    <div className="border-t border-border p-4 space-y-4">
-                      <div className="flex items-center justify-between">
-                        <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Line Items</h4>
-                        <div className="flex gap-2">
-                          <Button size="sm" variant="outline" onClick={() => { setAddingCustom(addingCustom === q.id ? null : q.id); setAddingItem(null); setAddingLabor(null); }}>
-                            <Package className="h-3 w-3 mr-1" /> Add Custom
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => { setAddingLabor(addingLabor === q.id ? null : q.id); setAddingItem(null); setAddingCustom(null); }}>
-                            <Wrench className="h-3 w-3 mr-1" /> Add Labor
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => { setAddingItem(addingItem === q.id ? null : q.id); setAddingLabor(null); setAddingCustom(null); }}>
-                            <Plus className="h-3 w-3 mr-1" /> Add Item
-                          </Button>
-                        </div>
-                      </div>
-
-                      {/* Add Inventory Item Form */}
-                      {addingItem === q.id && (
-                        <div className="bg-muted/30 p-3 rounded-lg space-y-3">
-                          <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add Inventory Item</div>
-                          <div>
-                            <Label className="text-xs">Select from Inventory (optional)</Label>
-                            <Select value={selectedInventoryItem} onValueChange={handleSelectInventoryItem}>
-                              <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Pick from inventory or enter manually below" /></SelectTrigger>
-                              <SelectContent>
-                                {inventoryList?.map((item: any) => (
-                                  <SelectItem key={item.id} value={String(item.id)}>{item.name} ({item.sku}) - ₱{Number(item.sellingPrice || 0).toLocaleString()}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="flex gap-2 items-end">
-                            <div className="flex-1"><Label className="text-xs">Description</Label><Input value={lineDesc} onChange={(e) => setLineDesc(e.target.value)} placeholder="Item description" className="bg-input border-border" /></div>
-                            <div className="w-20"><Label className="text-xs">Qty</Label><Input type="number" min="1" value={lineQty} onChange={(e) => setLineQty(e.target.value)} className="bg-input border-border" /></div>
-                            <div className="w-32"><Label className="text-xs">Unit Price</Label><Input type="number" step="0.01" value={linePrice} onChange={(e) => setLinePrice(e.target.value)} className="bg-input border-border" /></div>
-                            <Button size="sm" onClick={() => handleAddLineItem(q.id)} disabled={!lineDesc || !linePrice || addItemMutation.isPending}>Add</Button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Add Labor Cost Form */}
-                      {addingLabor === q.id && (
-                        <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg space-y-3">
-                          <div className="text-xs font-medium text-amber-400 uppercase tracking-wide">Add Labor Cost</div>
-                          <div className="flex gap-2 items-end">
-                            <div className="flex-1">
-                              <Label className="text-xs">Description</Label>
-                              <div className="flex gap-2">
-                                <Select onValueChange={(v) => setLaborDesc(v)}>
-                                  <SelectTrigger className="bg-input border-border w-48"><SelectValue placeholder="Select preset..." /></SelectTrigger>
-                                  <SelectContent>
-                                    {laborDescOptions?.map((opt: any) => (
-                                      <SelectItem key={opt.id} value={opt.value}>{opt.value}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                                <Input value={laborDesc} onChange={(e) => setLaborDesc(e.target.value)} placeholder="Or type custom..." className="bg-input border-border flex-1" />
-                              </div>
-                            </div>
-                            <div className="w-40"><Label className="text-xs">Amount (₱)</Label><Input type="number" step="0.01" min="0" value={laborAmount} onChange={(e) => setLaborAmount(e.target.value)} placeholder="Enter amount" className="bg-input border-border" /></div>
-                            <Button size="sm" onClick={() => handleAddLaborCost(q.id)} disabled={!laborDesc || !laborAmount || addLaborMutation.isPending}>Add</Button>
-                          </div>
-                          <p className="text-xs text-muted-foreground">Labor costs are not tied to inventory.</p>
-                        </div>
-                      )}
-
-                      {/* Add Custom Item Form */}
-                      {addingCustom === q.id && (
-                        <div className="bg-purple-500/10 border border-purple-500/20 p-3 rounded-lg space-y-3">
-                          <div className="text-xs font-medium text-purple-400 uppercase tracking-wide">Add Custom / Miscellaneous Item</div>
-                          <div className="flex gap-2 items-end">
-                            <div className="flex-1"><Label className="text-xs">Description</Label><Input value={customDesc} onChange={(e) => setCustomDesc(e.target.value)} placeholder="e.g. Permit Fees, Transportation, Documentation..." className="bg-input border-border" /></div>
-                            <div className="w-40"><Label className="text-xs">Amount (₱)</Label><Input type="number" step="0.01" min="0" value={customAmount} onChange={(e) => setCustomAmount(e.target.value)} placeholder="Enter amount" className="bg-input border-border" /></div>
-                            <Button size="sm" onClick={() => handleAddCustomItem(q.id)} disabled={!customDesc || !customAmount || addCustomMutation.isPending}>Add</Button>
-                          </div>
-                          <p className="text-xs text-muted-foreground">Miscellaneous charges not tied to inventory or labor (permits, transport, etc.).</p>
-                        </div>
-                      )}
-
-                      {quoteItems && quoteItems.length > 0 ? (
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b border-border/50">
-                              <th className="text-left p-2 text-muted-foreground font-medium">Type</th>
-                              <th className="text-left p-2 text-muted-foreground font-medium">Description</th>
-                              <th className="text-center p-2 text-muted-foreground font-medium">Qty</th>
-                              <th className="text-right p-2 text-muted-foreground font-medium">Unit Price</th>
-                              <th className="text-right p-2 text-muted-foreground font-medium">Total</th>
-                              <th className="p-2"></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {quoteItems.map((item: any) => (
-                              <tr key={item.id} className="border-b border-border/30">
-                                <td className="p-2">
-                                  {item.itemType === "labor" ? (
-                                    <Badge variant="outline" className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-xs">Labor</Badge>
-                                  ) : item.itemType === "custom" ? (
-                                    <Badge variant="outline" className="bg-purple-500/20 text-purple-400 border-purple-500/30 text-xs">Custom</Badge>
-                                  ) : (
-                                    <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">Item</Badge>
-                                  )}
-                                </td>
-                                <td className="p-2 text-foreground">{item.description}</td>
-                                <td className="p-2 text-center text-foreground">{item.itemType === "inventory" ? item.quantity : "-"}</td>
-                                <td className="p-2 text-right text-foreground">₱{Number(item.unitPrice).toLocaleString()}</td>
-                                <td className="p-2 text-right text-foreground font-medium">₱{Number(item.totalPrice).toLocaleString()}</td>
-                                <td className="p-2">
-                                  <Button variant="ghost" size="sm" onClick={() => removeItemMutation.mutate({ id: item.id, quotationId: q.id })}>
-                                    <Trash2 className="h-3 w-3 text-destructive" />
-                                  </Button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+      <DetailDialog
+        open={!!viewingQuote}
+        onOpenChange={(open) => !open && setViewingQuote(null)}
+        title={viewingQuote?.title}
+        subtitle={viewingQuote ? `${viewingQuote.quoteNumber} • v${viewingQuote.version}` : undefined}
+        headerRight={
+          viewingQuote ? (
+            <Badge variant="outline" className={statusColors[viewingQuote.status]}>
+              {viewingQuote.status.replace("_", " ")}
+            </Badge>
+          ) : undefined
+        }
+        sections={[
+          {
+            title: "Customer & Account",
+            fields: [
+              { label: "Customer Name", value: viewingQuote?.customerName },
+              { label: "Customer Email", value: viewingQuote?.customerEmail },
+              { label: "Customer Phone", value: viewingQuote?.customerPhone },
+              { label: "Customer Address", value: viewingQuote?.customerAddress, full: true },
+              { label: "Linked Contact", value: viewingQuote?.contactId ? (viewingQuote?.contactName ?? `#${viewingQuote.contactId}`) : null },
+              { label: "Business Account", value: viewingQuote?.accountId ? (viewingQuote?.accountName ?? `#${viewingQuote.accountId}`) : null },
+              { label: "Linked Opportunity", value: viewingQuote?.opportunityId ? (viewingQuote?.opportunityName ?? `#${viewingQuote.opportunityId}`) : null },
+            ],
+          },
+          {
+            title: "Financials",
+            fields: [
+              { label: "Subtotal", value: viewingQuote ? formatPHP(viewingQuote.subtotal) : undefined },
+              { label: "Discount %", value: viewingQuote?.discountPercent ? `${viewingQuote.discountPercent}%` : null },
+              { label: "Manual Discount", value: viewingQuote ? formatPHP(viewingQuote.discountManualAmount) : undefined },
+              { label: "Discount Amount", value: viewingQuote ? formatPHP(viewingQuote.discountAmount) : undefined },
+              { label: "VAT Applied", value: viewingQuote ? (viewingQuote.vatEnabled ? "Yes" : "No") : undefined },
+              { label: "VAT Rate", value: viewingQuote?.taxPercent ? `${viewingQuote.taxPercent}%` : null },
+              { label: "VAT Amount", value: viewingQuote ? formatPHP(viewingQuote.taxAmount) : undefined },
+              { label: "Labor Cost", value: viewingQuote ? formatPHP(viewingQuote.laborCost) : undefined },
+              { label: "Installation Fee", value: viewingQuote ? formatPHP(viewingQuote.installationFee) : undefined },
+              { label: "Total Amount", value: viewingQuote ? formatPHP(viewingQuote.totalAmount) : undefined },
+            ],
+          },
+          {
+            title: "Terms",
+            fields: [
+              { label: "Valid Until", value: viewingQuote?.validUntil ? new Date(viewingQuote.validUntil).toLocaleDateString() : null },
+              { label: "Payment Terms", value: viewingQuote?.paymentTerms, full: true },
+              { label: "Warranty Terms", value: viewingQuote?.warrantyTerms, full: true },
+            ],
+          },
+          {
+            title: "Notes",
+            fields: [{ label: "Notes", value: viewingQuote?.notes, full: true }],
+          },
+          {
+            title: "Record Info",
+            fields: [
+              { label: "Version", value: viewingQuote?.version },
+              { label: "Created By", value: viewingQuote?.createdByName },
+              { label: "Created At", value: viewingQuote?.createdAt ? new Date(viewingQuote.createdAt).toLocaleDateString() : null },
+              { label: "Last Updated", value: viewingQuote?.updatedAt ? new Date(viewingQuote.updatedAt).toLocaleDateString() : null },
+              { label: "Last Edited By", value: viewingQuote?.lastEditedBy ? (viewingQuote?.lastEditedByName ?? `#${viewingQuote.lastEditedBy}`) : null },
+              { label: "Approved By", value: viewingQuote?.approvedBy ? (viewingQuote?.approvedByName ?? `#${viewingQuote.approvedBy}`) : null },
+              { label: "Approved At", value: viewingQuote?.approvedAt ? new Date(viewingQuote.approvedAt).toLocaleDateString() : null },
+            ],
+          },
+        ]}
+        onEdit={() => {
+          const quote = viewingQuote;
+          setViewingQuote(null);
+          setEditingQuoteId(quote.id);
+        }}
+        onDelete={() => handleDelete(viewingQuote)}
+        isDeleting={deleteMutation.isPending}
+      >
+        <div>
+          <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70 mb-3">Line Items</h3>
+          {viewingItems && viewingItems.length > 0 ? (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border/50">
+                  <th className="text-left p-2 text-muted-foreground font-medium">Type</th>
+                  <th className="text-left p-2 text-muted-foreground font-medium">Description</th>
+                  <th className="text-center p-2 text-muted-foreground font-medium">Qty</th>
+                  <th className="text-right p-2 text-muted-foreground font-medium">Unit Price</th>
+                  <th className="text-right p-2 text-muted-foreground font-medium">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {viewingItems.map((item: any) => (
+                  <tr key={item.id} className="border-b border-border/30">
+                    <td className="p-2">
+                      {item.itemType === "labor" ? (
+                        <Badge variant="outline" className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-xs">Labor</Badge>
+                      ) : item.itemType === "custom" ? (
+                        <Badge variant="outline" className="bg-purple-500/20 text-purple-400 border-purple-500/30 text-xs">Custom</Badge>
                       ) : (
-                        <p className="text-sm text-muted-foreground italic">No line items. Add products, labor costs, or custom items.</p>
+                        <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">Item</Badge>
                       )}
-
-                      {/* Receipt History */}
-                      {((deliveryReceipts && deliveryReceipts.length > 0) || (ackReceipts && ackReceipts.length > 0)) && (
-                        <div className="mt-4 border-t border-border/50 pt-4">
-                          <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">Receipt History</h4>
-                          <div className="space-y-2">
-                            {deliveryReceipts?.map((dr: any) => (
-                              <div key={`dr-${dr.id}`} className="flex items-center justify-between bg-blue-500/5 border border-blue-500/20 rounded-md px-3 py-2">
-                                <div className="flex items-center gap-3">
-                                  <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">DR</Badge>
-                                  <span className="text-sm font-medium text-foreground">{dr.receiptNumber}</span>
-                                  <span className="text-xs text-muted-foreground">{new Date(dr.createdAt).toLocaleDateString()}</span>
-                                </div>
-                                <Button variant="ghost" size="sm" onClick={() => window.open(`/api/delivery-receipts/${dr.id}/print`, '_blank')} className="text-blue-400 hover:text-blue-300">
-                                  <FileText className="h-3 w-3 mr-1" /> Re-print
-                                </Button>
-                              </div>
-                            ))}
-                            {ackReceipts?.map((ack: any) => (
-                              <div key={`ack-${ack.id}`} className="flex items-center justify-between bg-green-500/5 border border-green-500/20 rounded-md px-3 py-2">
-                                <div className="flex items-center gap-3">
-                                  <Badge variant="outline" className="bg-green-500/20 text-green-400 border-green-500/30 text-xs">ACK</Badge>
-                                  <span className="text-sm font-medium text-foreground">{ack.receiptNumber}</span>
-                                  <span className="text-xs text-muted-foreground">{new Date(ack.createdAt).toLocaleDateString()}</span>
-                                  {ack.amount && <span className="text-xs text-muted-foreground">₱{Number(ack.amount).toLocaleString()}</span>}
-                                </div>
-                                <Button variant="ghost" size="sm" onClick={() => window.open(`/api/acknowledgement-receipts/${ack.id}/print`, '_blank')} className="text-green-400 hover:text-green-300">
-                                  <FileText className="h-3 w-3 mr-1" /> Re-print
-                                </Button>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Totals Summary */}
-                      {q.subtotal && (
-                        <div className="flex justify-end">
-                          <div className="w-64 space-y-1 text-sm">
-                            <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="text-foreground">₱{Number(q.subtotal).toLocaleString()}</span></div>
-                            {Number(q.discountPercent) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Discount ({q.discountPercent}%)</span><span className="text-destructive">-₱{(Number(q.subtotal) * Number(q.discountPercent) / 100).toLocaleString()}</span></div>}
-                            {Number(q.discountManualAmount) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Manual Discount</span><span className="text-destructive">-₱{Number(q.discountManualAmount).toLocaleString()}</span></div>}
-                            {Number(q.discountAmount) > 0 && !Number(q.discountPercent) && !Number(q.discountManualAmount) && <div className="flex justify-between"><span className="text-muted-foreground">Discount</span><span className="text-destructive">-₱{Number(q.discountAmount).toLocaleString()}</span></div>}
-                            {q.vatEnabled && Number(q.taxAmount) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">VAT ({q.taxPercent}%)</span><span className="text-foreground">₱{Number(q.taxAmount).toLocaleString()}</span></div>}
-                            {Number(q.laborCost) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Labor</span><span className="text-foreground">₱{Number(q.laborCost).toLocaleString()}</span></div>}
-                            {Number(q.installationFee) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Installation</span><span className="text-foreground">₱{Number(q.installationFee).toLocaleString()}</span></div>}
-                            <div className="flex justify-between border-t border-border pt-1 font-semibold"><span className="text-foreground">Total</span><span className="text-foreground">₱{Number(q.totalAmount).toLocaleString()}</span></div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            ))
+                    </td>
+                    <td className="p-2 text-foreground">{item.description}</td>
+                    <td className="p-2 text-center text-foreground">{item.itemType === "inventory" ? item.quantity : "-"}</td>
+                    <td className="p-2 text-right text-foreground">{formatPHP(item.unitPrice)}</td>
+                    <td className="p-2 text-right text-foreground font-medium">{formatPHP(item.totalPrice)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={4} className="p-2 text-right font-semibold text-foreground">Total</td>
+                  <td className="p-2 text-right font-semibold text-foreground">{formatPHP(viewingQuote?.totalAmount)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          ) : (
+            <p className="text-sm text-muted-foreground italic">No line items.</p>
           )}
         </div>
+      </DetailDialog>
 
-        {/* Pagination */}
-        {quotationsList && quotationsList.total > 20 && (
-          <PaginationControls
-            page={page}
-            totalPages={Math.ceil(quotationsList.total / 20)}
-            total={quotationsList.total}
-            limit={20}
-            onPageChange={setPage}
-          />
+      {editingQuoteId && (
+        <EditQuotationDialog quotationId={editingQuoteId} open={!!editingQuoteId} onOpenChange={(o) => { if (!o) setEditingQuoteId(null); }} />
+      )}
+
+      {/* Search & Filters */}
+      <Card className="bg-card border-border">
+        <CardContent className="p-4 space-y-3">
+          <div className="flex gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input value={searchFilter} onChange={(e) => { setSearchFilter(e.target.value); setPage(1); }} placeholder="Search by customer, title, quote#, address, notes, date..." className="pl-10 bg-input border-border" />
+            </div>
+            <Button variant="outline" onClick={() => setShowFilters(!showFilters)} className="border-border">
+              <Filter className="h-4 w-4 mr-2" /> Filters {showFilters ? <ChevronUp className="h-4 w-4 ml-1" /> : <ChevronDown className="h-4 w-4 ml-1" />}
+            </Button>
+          </div>
+          {showFilters && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-3 border-t border-border/50">
+              <div><Label className="text-xs">Address</Label><Input value={addressFilter} onChange={(e) => { setAddressFilter(e.target.value); setPage(1); }} placeholder="Filter by address" className="bg-input border-border" /></div>
+              <div><Label className="text-xs">kW Rating</Label><Input value={kwFilter} onChange={(e) => { setKwFilter(e.target.value); setPage(1); }} placeholder="e.g. 5kW" className="bg-input border-border" /></div>
+              <div><Label className="text-xs">Setup Type</Label><Input value={setupTypeFilter} onChange={(e) => { setSetupTypeFilter(e.target.value); setPage(1); }} placeholder="e.g. On-Grid" className="bg-input border-border" /></div>
+              <div><Label className="text-xs">Date From</Label><Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setPage(1); }} className="bg-input border-border" /></div>
+              <div><Label className="text-xs">Date To</Label><Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setPage(1); }} className="bg-input border-border" /></div>
+              <div className="col-span-full flex justify-end">
+                <Button variant="ghost" size="sm" onClick={() => { setSearchFilter(""); setAddressFilter(""); setKwFilter(""); setSetupTypeFilter(""); setDateFrom(""); setDateTo(""); setPage(1); }} className="text-muted-foreground">Clear Filters</Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Quotations List */}
+      <div className="space-y-4">
+        {isLoading ? (
+          <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">Loading...</CardContent></Card>
+        ) : !quotationsList?.items?.length ? (
+          <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">No quotations yet. Create your first quotation.</CardContent></Card>
+        ) : (
+          quotationsList?.items?.map((q: any) => (
+            <Card key={q.id} className="bg-card border-border">
+              <CardContent className="p-0">
+                <div className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/30 transition-colors" onClick={() => setExpandedQuote(expandedQuote === q.id ? null : q.id)}>
+                  <div className="flex items-center gap-3">
+                    <FileText className="h-5 w-5 text-primary" />
+                    <div>
+                      <div className="font-medium text-foreground">{q.title}</div>
+                      <div className="text-sm text-muted-foreground">
+                        {q.quoteNumber} {q.customerName ? `• ${q.customerName}` : ""}
+                        {(q as any).accountId ? <Badge variant="outline" className="ml-2 bg-blue-500/20 text-blue-400 border-blue-500/30 text-[10px]">Business Acct</Badge> : null}
+                        {q.vatEnabled ? <Badge variant="outline" className="ml-2 bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]">VAT</Badge> : null}
+                        {(q as any).createdByName && <span className="ml-2 text-xs text-muted-foreground">by {(q as any).createdByName}</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <Badge variant="outline" className={statusColors[q.status]}>{q.status.replace("_", " ")}</Badge>
+                    <div className="text-right">
+                      <div className="font-semibold text-foreground">{q.totalAmount ? `₱${Number(q.totalAmount).toLocaleString()}` : "-"}</div>
+                    </div>
+                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
+                      <Button variant="ghost" size="sm" onClick={() => setViewingQuote(q)} title="View">
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setEditingQuoteId(q.id)} title="Edit">
+                        <Edit2 className="h-4 w-4 text-blue-400" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => window.open(`/api/quotations/${q.id}/pdf`, '_blank')} title="Download PDF">
+                        <FileText className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleCreateDR(q.id)} title="Delivery Receipt">
+                        <Receipt className="h-4 w-4 text-amber-400" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleCreateAck(q.id)} title="Acknowledgement">
+                        <FileCheck className="h-4 w-4 text-green-400" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => handleDelete(q)} title="Delete">
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {expandedQuote === q.id && (
+                  <div className="border-t border-border p-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Line Items</h4>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => { setAddingCustom(addingCustom === q.id ? null : q.id); setAddingItem(null); setAddingLabor(null); }}>
+                          <Package className="h-3 w-3 mr-1" /> Add Custom
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => { setAddingLabor(addingLabor === q.id ? null : q.id); setAddingItem(null); setAddingCustom(null); }}>
+                          <Wrench className="h-3 w-3 mr-1" /> Add Labor
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => { setAddingItem(addingItem === q.id ? null : q.id); setAddingLabor(null); setAddingCustom(null); }}>
+                          <Plus className="h-3 w-3 mr-1" /> Add Item
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* Add Inventory Item Form */}
+                    {addingItem === q.id && (
+                      <div className="bg-muted/30 p-3 rounded-lg space-y-3">
+                        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add Inventory Item</div>
+                        <div>
+                          <Label className="text-xs">Select from Inventory (optional)</Label>
+                          <Select value={selectedInventoryItem} onValueChange={handleSelectInventoryItem}>
+                            <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Pick from inventory or enter manually below" /></SelectTrigger>
+                            <SelectContent>
+                              {inventoryList?.map((item: any) => (
+                                <SelectItem key={item.id} value={String(item.id)}>{item.name} ({item.sku}) - ₱{Number(item.sellingPrice || 0).toLocaleString()}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="flex gap-2 items-end">
+                          <div className="flex-1"><Label className="text-xs">Description</Label><Input value={lineDesc} onChange={(e) => setLineDesc(e.target.value)} placeholder="Item description" className="bg-input border-border" /></div>
+                          <div className="w-20"><Label className="text-xs">Qty</Label><Input type="number" min="1" value={lineQty} onChange={(e) => setLineQty(e.target.value)} className="bg-input border-border" /></div>
+                          <div className="w-32"><Label className="text-xs">Unit Price</Label><Input type="number" step="0.01" value={linePrice} onChange={(e) => setLinePrice(e.target.value)} className="bg-input border-border" /></div>
+                          <Button size="sm" onClick={() => handleAddLineItem(q.id)} disabled={!lineDesc || !linePrice || addItemMutation.isPending}>Add</Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Add Labor Cost Form */}
+                    {addingLabor === q.id && (
+                      <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg space-y-3">
+                        <div className="text-xs font-medium text-amber-400 uppercase tracking-wide">Add Labor Cost</div>
+                        <div className="flex gap-2 items-end">
+                          <div className="flex-1">
+                            <Label className="text-xs">Description</Label>
+                            <div className="flex gap-2">
+                              <Select onValueChange={(v) => setLaborDesc(v)}>
+                                <SelectTrigger className="bg-input border-border w-48"><SelectValue placeholder="Select preset..." /></SelectTrigger>
+                                <SelectContent>
+                                  {laborDescOptions?.map((opt: any) => (
+                                    <SelectItem key={opt.id} value={opt.value}>{opt.value}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Input value={laborDesc} onChange={(e) => setLaborDesc(e.target.value)} placeholder="Or type custom..." className="bg-input border-border flex-1" />
+                            </div>
+                          </div>
+                          <div className="w-40"><Label className="text-xs">Amount (₱)</Label><Input type="number" step="0.01" min="0" value={laborAmount} onChange={(e) => setLaborAmount(e.target.value)} placeholder="Enter amount" className="bg-input border-border" /></div>
+                          <Button size="sm" onClick={() => handleAddLaborCost(q.id)} disabled={!laborDesc || !laborAmount || addLaborMutation.isPending}>Add</Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">Labor costs are not tied to inventory.</p>
+                      </div>
+                    )}
+
+                    {/* Add Custom Item Form */}
+                    {addingCustom === q.id && (
+                      <div className="bg-purple-500/10 border border-purple-500/20 p-3 rounded-lg space-y-3">
+                        <div className="text-xs font-medium text-purple-400 uppercase tracking-wide">Add Custom / Miscellaneous Item</div>
+                        <div className="flex gap-2 items-end">
+                          <div className="flex-1"><Label className="text-xs">Description</Label><Input value={customDesc} onChange={(e) => setCustomDesc(e.target.value)} placeholder="e.g. Permit Fees, Transportation, Documentation..." className="bg-input border-border" /></div>
+                          <div className="w-40"><Label className="text-xs">Amount (₱)</Label><Input type="number" step="0.01" min="0" value={customAmount} onChange={(e) => setCustomAmount(e.target.value)} placeholder="Enter amount" className="bg-input border-border" /></div>
+                          <Button size="sm" onClick={() => handleAddCustomItem(q.id)} disabled={!customDesc || !customAmount || addCustomMutation.isPending}>Add</Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">Miscellaneous charges not tied to inventory or labor (permits, transport, etc.).</p>
+                      </div>
+                    )}
+
+                    {quoteItems && quoteItems.length > 0 ? (
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border/50">
+                            <th className="text-left p-2 text-muted-foreground font-medium">Type</th>
+                            <th className="text-left p-2 text-muted-foreground font-medium">Description</th>
+                            <th className="text-center p-2 text-muted-foreground font-medium">Qty</th>
+                            <th className="text-right p-2 text-muted-foreground font-medium">Unit Price</th>
+                            <th className="text-right p-2 text-muted-foreground font-medium">Total</th>
+                            <th className="p-2"></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {quoteItems.map((item: any) => (
+                            <tr key={item.id} className="border-b border-border/30">
+                              <td className="p-2">
+                                {item.itemType === "labor" ? (
+                                  <Badge variant="outline" className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-xs">Labor</Badge>
+                                ) : item.itemType === "custom" ? (
+                                  <Badge variant="outline" className="bg-purple-500/20 text-purple-400 border-purple-500/30 text-xs">Custom</Badge>
+                                ) : (
+                                  <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">Item</Badge>
+                                )}
+                              </td>
+                              <td className="p-2 text-foreground">{item.description}</td>
+                              <td className="p-2 text-center text-foreground">{item.itemType === "inventory" ? item.quantity : "-"}</td>
+                              <td className="p-2 text-right text-foreground">₱{Number(item.unitPrice).toLocaleString()}</td>
+                              <td className="p-2 text-right text-foreground font-medium">₱{Number(item.totalPrice).toLocaleString()}</td>
+                              <td className="p-2">
+                                <Button variant="ghost" size="sm" onClick={() => removeItemMutation.mutate({ id: item.id, quotationId: q.id })}>
+                                  <Trash2 className="h-3 w-3 text-destructive" />
+                                </Button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="text-sm text-muted-foreground italic">No line items. Add products, labor costs, or custom items.</p>
+                    )}
+
+                    {/* Receipt History */}
+                    {((deliveryReceipts && deliveryReceipts.length > 0) || (ackReceipts && ackReceipts.length > 0)) && (
+                      <div className="mt-4 border-t border-border/50 pt-4">
+                        <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">Receipt History</h4>
+                        <div className="space-y-2">
+                          {deliveryReceipts?.map((dr: any) => (
+                            <div key={`dr-${dr.id}`} className="flex items-center justify-between bg-blue-500/5 border border-blue-500/20 rounded-md px-3 py-2">
+                              <div className="flex items-center gap-3">
+                                <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-xs">DR</Badge>
+                                <span className="text-sm font-medium text-foreground">{dr.receiptNumber}</span>
+                                <span className="text-xs text-muted-foreground">{new Date(dr.createdAt).toLocaleDateString()}</span>
+                              </div>
+                              <Button variant="ghost" size="sm" onClick={() => window.open(`/api/delivery-receipts/${dr.id}/print`, '_blank')} className="text-blue-400 hover:text-blue-300">
+                                <FileText className="h-3 w-3 mr-1" /> Re-print
+                              </Button>
+                            </div>
+                          ))}
+                          {ackReceipts?.map((ack: any) => (
+                            <div key={`ack-${ack.id}`} className="flex items-center justify-between bg-green-500/5 border border-green-500/20 rounded-md px-3 py-2">
+                              <div className="flex items-center gap-3">
+                                <Badge variant="outline" className="bg-green-500/20 text-green-400 border-green-500/30 text-xs">ACK</Badge>
+                                <span className="text-sm font-medium text-foreground">{ack.receiptNumber}</span>
+                                <span className="text-xs text-muted-foreground">{new Date(ack.createdAt).toLocaleDateString()}</span>
+                                {ack.amount && <span className="text-xs text-muted-foreground">₱{Number(ack.amount).toLocaleString()}</span>}
+                              </div>
+                              <Button variant="ghost" size="sm" onClick={() => window.open(`/api/acknowledgement-receipts/${ack.id}/print`, '_blank')} className="text-green-400 hover:text-green-300">
+                                <FileText className="h-3 w-3 mr-1" /> Re-print
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Totals Summary */}
+                    {q.subtotal && (
+                      <div className="flex justify-end">
+                        <div className="w-64 space-y-1 text-sm">
+                          <div className="flex justify-between"><span className="text-muted-foreground">Subtotal</span><span className="text-foreground">₱{Number(q.subtotal).toLocaleString()}</span></div>
+                          {Number(q.discountPercent) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Discount ({q.discountPercent}%)</span><span className="text-destructive">-₱{(Number(q.subtotal) * Number(q.discountPercent) / 100).toLocaleString()}</span></div>}
+                          {Number(q.discountManualAmount) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Manual Discount</span><span className="text-destructive">-₱{Number(q.discountManualAmount).toLocaleString()}</span></div>}
+                          {Number(q.discountAmount) > 0 && !Number(q.discountPercent) && !Number(q.discountManualAmount) && <div className="flex justify-between"><span className="text-muted-foreground">Discount</span><span className="text-destructive">-₱{Number(q.discountAmount).toLocaleString()}</span></div>}
+                          {q.vatEnabled && Number(q.taxAmount) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">VAT ({q.taxPercent}%)</span><span className="text-foreground">₱{Number(q.taxAmount).toLocaleString()}</span></div>}
+                          {Number(q.laborCost) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Labor</span><span className="text-foreground">₱{Number(q.laborCost).toLocaleString()}</span></div>}
+                          {Number(q.installationFee) > 0 && <div className="flex justify-between"><span className="text-muted-foreground">Installation</span><span className="text-foreground">₱{Number(q.installationFee).toLocaleString()}</span></div>}
+                          <div className="flex justify-between border-t border-border pt-1 font-semibold"><span className="text-foreground">Total</span><span className="text-foreground">₱{Number(q.totalAmount).toLocaleString()}</span></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))
         )}
       </div>
-    </DashboardLayout>
+
+      {/* Pagination */}
+      {quotationsList && quotationsList.total > 20 && (
+        <PaginationControls
+          page={page}
+          totalPages={Math.ceil(quotationsList.total / 20)}
+          total={quotationsList.total}
+          limit={20}
+          onPageChange={setPage}
+        />
+      )}
+    </div>
   );
 }

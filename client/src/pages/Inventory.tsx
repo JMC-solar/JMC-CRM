@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,10 +11,12 @@ import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Plus, Search, Edit, Trash2, AlertTriangle, Lock, History } from "lucide-react";
 import ExportButtons from "@/components/ExportButtons";
+import DetailDialog from "@/components/DetailDialog";
 import { useState, useMemo } from "react";
 import { toast } from "sonner";
 import PaginationControls from "@/components/PaginationControls";
 import { confirm } from "@/lib/confirm";
+import { formatPHP } from "@/lib/utils";
 
 export default function Inventory() {
   const { user } = useAuth();
@@ -25,6 +26,7 @@ export default function Inventory() {
   const [page, setPage] = useState(1);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<any>(null);
+  const [viewingItem, setViewingItem] = useState<any>(null);
   const utils = trpc.useUtils();
 
   const { data, isLoading } = trpc.inventory.list.useQuery({ search, category: categoryFilter === "all" ? undefined : categoryFilter, page, limit: 20 });
@@ -46,9 +48,13 @@ export default function Inventory() {
     onError: (err: any) => toast.error(err.message),
   });
   const deleteMutation = trpc.inventory.delete.useMutation({
-    onSuccess: () => { toast.success("Item deleted"); utils.inventory.list.invalidate(); },
+    onSuccess: () => { toast.success("Item deleted"); setViewingItem(null); utils.inventory.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+
+  const handleDelete = async (item: any) => {
+    if (await confirm("Delete this item?")) deleteMutation.mutate({ id: item.id });
+  };
 
   const handleSearchChange = (value: string) => {
     setSearch(value);
@@ -190,127 +196,184 @@ export default function Inventory() {
   );
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Inventory</h1>
-            <p className="text-muted-foreground mt-1">Manage solar products and components.</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ExportButtons module="inventory" params={{ search: search || undefined, category: categoryFilter === "all" ? undefined : categoryFilter }} />
-            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-              <DialogTrigger asChild>
-                <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> Add Item</Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-lg bg-card border-border max-h-[80vh] overflow-y-auto">
-                <DialogHeader><DialogTitle className="text-foreground">Add Inventory Item</DialogTitle></DialogHeader>
-                <ItemForm onSubmit={handleCreate} submitLabel="Add Item" isPending={createMutation.isPending} />
-              </DialogContent>
-            </Dialog>
-          </div>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Inventory</h1>
+          <p className="text-muted-foreground mt-1">Manage solar products and components.</p>
         </div>
-
-        <div className="flex gap-4">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input placeholder="Search by name, SKU, brand, model, description, location..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="pl-10 bg-input border-border" />
-          </div>
-          <Select value={categoryFilter} onValueChange={handleCategoryChange}>
-            <SelectTrigger className="w-40 bg-input border-border"><SelectValue placeholder="All Categories" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Categories</SelectItem>
-              <SelectItem value="panels">Panels</SelectItem>
-              <SelectItem value="inverters">Inverters</SelectItem>
-              <SelectItem value="batteries">Batteries</SelectItem>
-              <SelectItem value="accessories">Accessories</SelectItem>
-              <SelectItem value="mounting">Mounting</SelectItem>
-              <SelectItem value="cabling">Cabling</SelectItem>
-              <SelectItem value="breakers">Breakers</SelectItem>
-            </SelectContent>
-          </Select>
+        <div className="flex items-center gap-2">
+          <ExportButtons module="inventory" params={{ search: search || undefined, category: categoryFilter === "all" ? undefined : categoryFilter }} />
+          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <DialogTrigger asChild>
+              <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> Add Item</Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-lg bg-card border-border max-h-[80vh] overflow-y-auto">
+              <DialogHeader><DialogTitle className="text-foreground">Add Inventory Item</DialogTitle></DialogHeader>
+              <ItemForm onSubmit={handleCreate} submitLabel="Add Item" isPending={createMutation.isPending} />
+            </DialogContent>
+          </Dialog>
         </div>
-
-        <Card className="bg-card border-border">
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">SKU</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Name</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Category</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Unit</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Location</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Stock</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Price</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {isLoading ? (
-                    <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
-                  ) : !items || items.length === 0 ? (
-                    <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No items found.</td></tr>
-                  ) : (
-                    items.map((item: any) => (
-                      <tr key={item.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                        <td className="p-4 text-sm font-mono text-muted-foreground">{item.sku}</td>
-                        <td className="p-4">
-                          <div className="font-medium text-foreground">{item.name}</div>
-                          <div className="text-xs text-muted-foreground">{item.brand} {item.model}</div>
-                        </td>
-                        <td className="p-4"><Badge variant="outline" className="capitalize">{item.category}</Badge></td>
-                        <td className="p-4 text-sm text-muted-foreground">{item.unit || "pcs"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{item.warehouseLocation || "-"}</td>
-                        <td className="p-4">
-                          <div className="flex items-center gap-2">
-                            <span className="text-foreground font-medium">{item.stockOnHand}</span>
-                            {item.stockOnHand <= (item.reorderLevel || 5) && (
-                              <AlertTriangle className="h-4 w-4 text-destructive" />
-                            )}
-                          </div>
-                        </td>
-                        <td className="p-4 text-sm text-foreground">{item.sellingPrice ? `₱${Number(item.sellingPrice).toLocaleString()}` : "-"}</td>
-                        <td className="p-4">
-                          <div className="flex gap-2">
-                            <Button variant="ghost" size="sm" onClick={() => setEditingItem(item)}><Edit className="h-4 w-4" /></Button>
-                            {isAdmin && (
-                              <Button variant="ghost" size="sm" onClick={async () => { if (await confirm("Delete?")) deleteMutation.mutate({ id: item.id }); }}><Trash2 className="h-4 w-4 text-destructive" /></Button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-            {data && (
-              <PaginationControls
-                page={data.page}
-                totalPages={data.totalPages}
-                total={data.total}
-                limit={data.limit}
-                onPageChange={setPage}
-              />
-            )}
-          </CardContent>
-        </Card>
-
-        <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
-          <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
-            <DialogHeader><DialogTitle className="text-foreground">Edit Item</DialogTitle></DialogHeader>
-            {editingItem && (
-              <>
-                <ItemForm defaults={editingItem} onSubmit={handleUpdate} submitLabel="Update Item" isPending={updateMutation.isPending} />
-                <PriceHistorySection itemId={editingItem.id} />
-              </>
-            )}
-          </DialogContent>
-        </Dialog>
       </div>
-    </DashboardLayout>
+
+      <div className="flex gap-4">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="Search by name, SKU, brand, model, description, location..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="pl-10 bg-input border-border" />
+        </div>
+        <Select value={categoryFilter} onValueChange={handleCategoryChange}>
+          <SelectTrigger className="w-40 bg-input border-border"><SelectValue placeholder="All Categories" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Categories</SelectItem>
+            <SelectItem value="panels">Panels</SelectItem>
+            <SelectItem value="inverters">Inverters</SelectItem>
+            <SelectItem value="batteries">Batteries</SelectItem>
+            <SelectItem value="accessories">Accessories</SelectItem>
+            <SelectItem value="mounting">Mounting</SelectItem>
+            <SelectItem value="cabling">Cabling</SelectItem>
+            <SelectItem value="breakers">Breakers</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <Card className="bg-card border-border">
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">SKU</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Name</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Category</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Unit</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Location</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Stock</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Price</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {isLoading ? (
+                  <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
+                ) : !items || items.length === 0 ? (
+                  <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No items found.</td></tr>
+                ) : (
+                  items.map((item: any) => (
+                    <tr
+                      key={item.id}
+                      onClick={() => setViewingItem(item)}
+                      className="border-b border-border/50 hover:bg-muted/30 transition-colors cursor-pointer"
+                    >
+                      <td className="p-4 text-sm font-mono text-muted-foreground">{item.sku}</td>
+                      <td className="p-4">
+                        <div className="font-medium text-foreground">{item.name}</div>
+                        <div className="text-xs text-muted-foreground">{item.brand} {item.model}</div>
+                      </td>
+                      <td className="p-4"><Badge variant="outline" className="capitalize">{item.category}</Badge></td>
+                      <td className="p-4 text-sm text-muted-foreground">{item.unit || "pcs"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{item.warehouseLocation || "-"}</td>
+                      <td className="p-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-foreground font-medium">{item.stockOnHand}</span>
+                          {item.stockOnHand <= (item.reorderLevel || 5) && (
+                            <AlertTriangle className="h-4 w-4 text-destructive" />
+                          )}
+                        </div>
+                      </td>
+                      <td className="p-4 text-sm text-foreground">{item.sellingPrice ? `₱${Number(item.sellingPrice).toLocaleString()}` : "-"}</td>
+                      <td className="p-4">
+                        {/* Stop row-level view clicks from firing behind the action buttons */}
+                        <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                          <Button variant="ghost" size="sm" onClick={() => setEditingItem(item)}><Edit className="h-4 w-4" /></Button>
+                          {isAdmin && (
+                            <Button variant="ghost" size="sm" onClick={() => handleDelete(item)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+          {data && (
+            <PaginationControls
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              limit={data.limit}
+              onPageChange={setPage}
+            />
+          )}
+        </CardContent>
+      </Card>
+
+      <DetailDialog
+        open={!!viewingItem}
+        onOpenChange={(open) => !open && setViewingItem(null)}
+        title={viewingItem?.name}
+        subtitle={viewingItem?.sku}
+        headerRight={
+          viewingItem ? (
+            <Badge variant="outline" className="capitalize">{viewingItem.category}</Badge>
+          ) : undefined
+        }
+        sections={[
+          {
+            title: "Item Details",
+            fields: [
+              { label: "SKU", value: viewingItem?.sku },
+              { label: "Name", value: viewingItem?.name },
+              { label: "Brand", value: viewingItem?.brand },
+              { label: "Model", value: viewingItem?.model },
+              { label: "Unit", value: viewingItem?.unit },
+              { label: "Storage Location", value: viewingItem?.warehouseLocation },
+              { label: "Description", value: viewingItem?.description, full: true },
+              { label: "Specifications", value: viewingItem?.specs, full: true },
+            ],
+          },
+          {
+            title: "Stock & Pricing",
+            fields: [
+              {
+                label: "Stock On Hand",
+                value: viewingItem ? (
+                  <span className="flex items-center gap-2">
+                    <span className="font-medium">{viewingItem.stockOnHand}</span>
+                    {viewingItem.stockOnHand <= (viewingItem.reorderLevel || 5) && (
+                      <AlertTriangle className="h-4 w-4 text-destructive" />
+                    )}
+                  </span>
+                ) : undefined,
+              },
+              { label: "Reserved Stock", value: viewingItem?.stockReserved },
+              { label: "Reorder Level", value: viewingItem?.reorderLevel },
+              { label: "Purchase Price", value: viewingItem ? formatPHP(viewingItem.purchasePrice, true) : undefined },
+              { label: "Selling Price", value: viewingItem ? formatPHP(viewingItem.sellingPrice, true) : undefined },
+            ],
+          },
+        ]}
+        onEdit={() => {
+          const item = viewingItem;
+          setViewingItem(null);
+          setEditingItem(item);
+        }}
+        onDelete={isAdmin ? () => handleDelete(viewingItem) : undefined}
+        isDeleting={deleteMutation.isPending}
+      />
+
+      <Dialog open={!!editingItem} onOpenChange={(open) => !open && setEditingItem(null)}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Edit Item</DialogTitle></DialogHeader>
+          {editingItem && (
+            <>
+              <ItemForm defaults={editingItem} onSubmit={handleUpdate} submitLabel="Update Item" isPending={updateMutation.isPending} />
+              <PriceHistorySection itemId={editingItem.id} />
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 

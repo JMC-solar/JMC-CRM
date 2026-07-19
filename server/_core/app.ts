@@ -1,13 +1,19 @@
 import express, { type Express } from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { registerStorageProxy } from "./storageProxy";
+import { registerMcpRoute } from "../mcp/route";
+import { oauthProvider } from "../mcp/oauth/provider";
+import { oauthLoginRouter } from "../mcp/oauth/loginPage";
 import { appRouter } from "../routers";
 import { quotationPdfRouter } from "../quotationPdf";
 import { documentPdfRouter } from "../documentPdf";
 import { localAuthRouter } from "../localAuth";
 import { exportRouter } from "../exportRouter";
 import { poPdfRouter } from "../poPdf";
+import { retailPdfRouter } from "../retailPdf";
 import { createContext } from "./context";
+import { ENV } from "./env";
 
 /**
  * Builds the Express app shared by both the local dev server
@@ -25,11 +31,29 @@ export function createApp(): Express {
   app.use(express.urlencoded({ limit: "4mb", extended: true }));
 
   registerStorageProxy(app);
+  registerMcpRoute(app);
+
+  // OAuth 2.1 authorization server for claude.ai/Desktop custom connectors
+  // (Tier 2 — see .claude/plans/jiggly-rolling-zebra.md). Tier 1 bearer
+  // tokens (mint-mcp-token.ts) keep working unchanged; this is additive.
+  // MUST be mounted at the application root per the SDK's own requirement.
+  app.use(
+    mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: new URL(ENV.appPublicUrl),
+      resourceServerUrl: new URL(`${ENV.appPublicUrl}/api/mcp`),
+      resourceName: "JMC Solar CRM",
+      scopesSupported: [],
+    })
+  );
+  app.use(oauthLoginRouter);
+
   app.use(quotationPdfRouter);
   app.use(documentPdfRouter);
   app.use(localAuthRouter);
   app.use(exportRouter);
   app.use(poPdfRouter);
+  app.use(retailPdfRouter);
 
   // tRPC API
   app.use(

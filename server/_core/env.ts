@@ -13,4 +13,9 @@ export const ENV = {
   s3Endpoint: process.env.S3_ENDPOINT ?? "", // Optional: for S3-compatible services like DigitalOcean Spaces
   // Google Maps (optional)
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY ?? "",
+  // Fixed origin for this deployment — needed at app-boot time for the OAuth
+  // issuer/resource URLs (mcpAuthRouter mounts once per cold start, so this
+  // can't be derived per-request the way export/document links are).
+  // MUST be set to the real https origin in Vercel prod env vars.
+  appPublicUrl: process.env.APP_PUBLIC_URL ?? "http://localhost:3000",
 };

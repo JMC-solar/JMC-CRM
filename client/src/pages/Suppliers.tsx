@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,12 +11,14 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { confirm } from "@/lib/confirm";
+import DetailDialog from "@/components/DetailDialog";
 
 export default function Suppliers() {
   const [search, setSearch] = useState("");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<any>(null);
   const [viewingPrices, setViewingPrices] = useState<any>(null);
+  const [viewingSupplier, setViewingSupplier] = useState<any>(null);
   const utils = trpc.useUtils();
 
   const { data: suppliersList, isLoading } = trpc.suppliers.list.useQuery({ search });
@@ -30,9 +31,13 @@ export default function Suppliers() {
     onError: (err: any) => toast.error(err.message),
   });
   const deleteMutation = trpc.suppliers.delete.useMutation({
-    onSuccess: () => { toast.success("Supplier deleted"); utils.suppliers.list.invalidate(); utils.suppliers.listAll.invalidate(); },
+    onSuccess: () => { toast.success("Supplier deleted"); setViewingSupplier(null); utils.suppliers.list.invalidate(); utils.suppliers.listAll.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+
+  const handleDelete = async (supplier: any) => {
+    if (await confirm("Delete this supplier?")) deleteMutation.mutate({ id: supplier.id });
+  };
 
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -89,92 +94,128 @@ export default function Suppliers() {
   );
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-foreground">Suppliers</h1>
-            <p className="text-muted-foreground mt-1">Manage your supplier directory.</p>
-          </div>
-          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-            <DialogTrigger asChild>
-              <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> Add Supplier</Button>
-            </DialogTrigger>
-            <DialogContent className="max-w-lg bg-card border-border max-h-[80vh] overflow-y-auto">
-              <DialogHeader><DialogTitle className="text-foreground">Add Supplier</DialogTitle></DialogHeader>
-              <SupplierForm onSubmit={handleCreate} submitLabel="Add Supplier" isPending={createMutation.isPending} />
-            </DialogContent>
-          </Dialog>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Suppliers</h1>
+          <p className="text-muted-foreground mt-1">Manage your supplier directory.</p>
         </div>
-
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search by name, code, contact, phone, email, city..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-10 bg-input border-border" />
-        </div>
-
-        <div className="grid gap-4">
-          {isLoading ? (
-            <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">Loading...</CardContent></Card>
-          ) : suppliersList?.length === 0 ? (
-            <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">No suppliers found. Add your first supplier above.</CardContent></Card>
-          ) : (
-            suppliersList?.map((supplier: any) => (
-              <Card key={supplier.id} className="bg-card border-border hover:border-primary/30 transition-colors">
-                <CardContent className="p-5">
-                  <div className="flex items-start justify-between">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
-                          <Building className="h-5 w-5 text-primary" />
-                        </div>
-                        <div>
-                          <h3 className="font-semibold text-foreground">{supplier.name}</h3>
-                          {supplier.code && <p className="text-xs text-muted-foreground font-mono">{supplier.code}</p>}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-4 text-sm text-muted-foreground ml-13">
-                        {supplier.contactPerson && <span>{supplier.contactPerson}</span>}
-                        {supplier.phone && <span className="flex items-center gap-1"><Phone className="h-3 w-3" />{supplier.phone}</span>}
-                        {supplier.email && <span className="flex items-center gap-1"><Mail className="h-3 w-3" />{supplier.email}</span>}
-                        {supplier.city && <span>{supplier.city}</span>}
-                        {supplier.paymentTerms && <span className="text-primary/80">Terms: {supplier.paymentTerms}</span>}
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="ghost" size="sm" onClick={() => setViewingPrices(supplier)} title="View item prices"><DollarSign className="h-4 w-4 text-green-400" /></Button>
-                      <Button variant="ghost" size="sm" onClick={() => setEditingSupplier(supplier)}><Edit className="h-4 w-4" /></Button>
-                      <Button variant="ghost" size="sm" onClick={async () => { if (await confirm("Delete this supplier?")) deleteMutation.mutate({ id: supplier.id }); }}><Trash2 className="h-4 w-4 text-destructive" /></Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))
-          )}
-        </div>
-
-        <Dialog open={!!editingSupplier} onOpenChange={(open) => !open && setEditingSupplier(null)}>
+        <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+          <DialogTrigger asChild>
+            <Button className="bg-primary text-primary-foreground"><Plus className="h-4 w-4 mr-2" /> Add Supplier</Button>
+          </DialogTrigger>
           <DialogContent className="max-w-lg bg-card border-border max-h-[80vh] overflow-y-auto">
-            <DialogHeader><DialogTitle className="text-foreground">Edit Supplier</DialogTitle></DialogHeader>
-            {editingSupplier && (
-              <SupplierForm defaults={editingSupplier} onSubmit={handleUpdate} submitLabel="Update Supplier" isPending={updateMutation.isPending} />
-            )}
-          </DialogContent>
-        </Dialog>
-
-        {/* Supplier Item Prices Dialog */}
-        <Dialog open={!!viewingPrices} onOpenChange={(open) => !open && setViewingPrices(null)}>
-          <DialogContent className="max-w-2xl bg-card border-border max-h-[80vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle className="text-foreground flex items-center gap-2">
-                <DollarSign className="h-5 w-5 text-green-400" />
-                Supplier Item Prices — {viewingPrices?.name}
-              </DialogTitle>
-            </DialogHeader>
-            {viewingPrices && <SupplierPricesList supplierId={viewingPrices.id} />}
+            <DialogHeader><DialogTitle className="text-foreground">Add Supplier</DialogTitle></DialogHeader>
+            <SupplierForm onSubmit={handleCreate} submitLabel="Add Supplier" isPending={createMutation.isPending} />
           </DialogContent>
         </Dialog>
       </div>
-    </DashboardLayout>
+
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input placeholder="Search by name, code, contact, phone, email, city..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-10 bg-input border-border" />
+      </div>
+
+      <div className="grid gap-4">
+        {isLoading ? (
+          <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">Loading...</CardContent></Card>
+        ) : suppliersList?.length === 0 ? (
+          <Card className="bg-card border-border"><CardContent className="p-8 text-center text-muted-foreground">No suppliers found. Add your first supplier above.</CardContent></Card>
+        ) : (
+          suppliersList?.map((supplier: any) => (
+            <Card
+              key={supplier.id}
+              onClick={() => setViewingSupplier(supplier)}
+              className="bg-card border-border hover:border-primary/30 transition-colors cursor-pointer"
+            >
+              <CardContent className="p-5">
+                <div className="flex items-start justify-between">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <Building className="h-5 w-5 text-primary" />
+                      </div>
+                      <div>
+                        <h3 className="font-semibold text-foreground">{supplier.name}</h3>
+                        {supplier.code && <p className="text-xs text-muted-foreground font-mono">{supplier.code}</p>}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-4 text-sm text-muted-foreground ml-13">
+                      {supplier.contactPerson && <span>{supplier.contactPerson}</span>}
+                      {supplier.phone && <span className="flex items-center gap-1"><Phone className="h-3 w-3" />{supplier.phone}</span>}
+                      {supplier.email && <span className="flex items-center gap-1"><Mail className="h-3 w-3" />{supplier.email}</span>}
+                      {supplier.city && <span>{supplier.city}</span>}
+                      {supplier.paymentTerms && <span className="text-primary/80">Terms: {supplier.paymentTerms}</span>}
+                    </div>
+                  </div>
+                  {/* Stop row-level view clicks from firing behind the action buttons */}
+                  <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                    <Button variant="ghost" size="sm" onClick={() => setViewingPrices(supplier)} title="View item prices"><DollarSign className="h-4 w-4 text-green-400" /></Button>
+                    <Button variant="ghost" size="sm" onClick={() => setEditingSupplier(supplier)}><Edit className="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="sm" onClick={() => handleDelete(supplier)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))
+        )}
+      </div>
+
+      <DetailDialog
+        open={!!viewingSupplier}
+        onOpenChange={(open) => !open && setViewingSupplier(null)}
+        title={viewingSupplier?.name}
+        subtitle={viewingSupplier?.code || undefined}
+        sections={[
+          {
+            title: "Supplier Details",
+            fields: [
+              { label: "Name", value: viewingSupplier?.name },
+              { label: "Code", value: viewingSupplier?.code },
+              { label: "Contact Person", value: viewingSupplier?.contactPerson },
+              { label: "Phone", value: viewingSupplier?.phone },
+              { label: "Email", value: viewingSupplier?.email },
+              { label: "City", value: viewingSupplier?.city },
+              { label: "Payment Terms", value: viewingSupplier?.paymentTerms },
+              { label: "Address", value: viewingSupplier?.address, full: true },
+            ],
+          },
+          {
+            title: "Notes",
+            fields: [{ label: "Notes", value: viewingSupplier?.notes, full: true }],
+          },
+        ]}
+        onEdit={() => {
+          const supplier = viewingSupplier;
+          setViewingSupplier(null);
+          setEditingSupplier(supplier);
+        }}
+        onDelete={() => handleDelete(viewingSupplier)}
+        isDeleting={deleteMutation.isPending}
+      />
+
+      <Dialog open={!!editingSupplier} onOpenChange={(open) => !open && setEditingSupplier(null)}>
+        <DialogContent className="max-w-lg bg-card border-border max-h-[80vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Edit Supplier</DialogTitle></DialogHeader>
+          {editingSupplier && (
+            <SupplierForm defaults={editingSupplier} onSubmit={handleUpdate} submitLabel="Update Supplier" isPending={updateMutation.isPending} />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Supplier Item Prices Dialog */}
+      <Dialog open={!!viewingPrices} onOpenChange={(open) => !open && setViewingPrices(null)}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground flex items-center gap-2">
+              <DollarSign className="h-5 w-5 text-green-400" />
+              Supplier Item Prices — {viewingPrices?.name}
+            </DialogTitle>
+          </DialogHeader>
+          {viewingPrices && <SupplierPricesList supplierId={viewingPrices.id} />}
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 

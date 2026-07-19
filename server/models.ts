@@ -33,6 +33,10 @@ export interface User {
   createdAt: Date;
   updatedAt: Date;
   lastSignedIn: Date;
+  /** Bumped to revoke every outstanding browser session token for this user at once. Absent = 0. */
+  tokenVersion?: number;
+  /** Same idea as tokenVersion but for MCP-issued bearer tokens — revoke agent credentials without logging out the browser. Absent = 0. */
+  mcpTokenVersion?: number;
 }
 
 // ============ CRM: CONTACTS ============
@@ -631,6 +635,9 @@ export interface CashRequest {
   decidedAt: Date | null;
   receivedAt: Date | null;
   notes: string | null;
+  // Admin's reason for rejecting, kept separate from the requester's own `notes`.
+  // Absent (`undefined`) on requests rejected before this field existed.
+  rejectionReason: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -644,5 +651,43 @@ export interface Notification {
   link: string | null;
   entityId: string | null;
   read: boolean;
+  createdAt: Date;
+}
+
+// ============ RETAIL SALES ============
+// Walk-in product sales, distinct from the Projects (installation job) flow.
+// Every line item must reference a real inventory_items row — enforced server-side
+// in server/routers.ts, never trust a client-supplied itemId/price/total.
+export interface RetailSale {
+  id: number;
+  contactId: number;
+  // Denormalized at sale time from the Contact; re-derived from the live contact on
+  // read (see personName/nameFor in server/routers.ts) and falls back to this snapshot
+  // if the contact has since been deleted.
+  customerName: string | null;
+  saleDate: Date;
+  subtotal: string;
+  totalAmount: string;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// ============ RETAIL SALE LINE ITEMS ============
+export interface RetailSaleItem {
+  id: number;
+  retailSaleId: number;
+  itemId: number;
+  // Snapshot of the inventory_items row at time of sale — prices and descriptions
+  // change, and the sale record must not silently rewrite history.
+  itemName: string | null;
+  itemSku: string | null;
+  description: string | null;
+  unit: string | null;
+  quantity: number;
+  unitPrice: string;
+  lineTotal: string;
   createdAt: Date;
 }

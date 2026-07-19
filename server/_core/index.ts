@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./loadEnv";
 import { createServer } from "http";
 import { createApp } from "./app";
 import { setupVite } from "./vite";

@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -88,20 +87,16 @@ export default function PurchaseOrderDetail() {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
-        <div className="flex items-center justify-center h-64 text-muted-foreground">Loading...</div>
-      </DashboardLayout>
+      <div className="flex items-center justify-center h-64 text-muted-foreground">Loading...</div>
     );
   }
 
   if (!po) {
     return (
-      <DashboardLayout>
-        <div className="flex flex-col items-center justify-center h-64 gap-4">
-          <p className="text-muted-foreground">Purchase order not found.</p>
-          <Button variant="outline" onClick={() => navigate("/purchase-orders")}>Back to POs</Button>
-        </div>
-      </DashboardLayout>
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <p className="text-muted-foreground">Purchase order not found.</p>
+        <Button variant="outline" onClick={() => navigate("/purchase-orders")}>Back to POs</Button>
+      </div>
     );
   }
 
@@ -119,241 +114,239 @@ export default function PurchaseOrderDetail() {
   const poVatAmount = poVatEnabled ? poAfterDiscount * (poVatRate / 100) : 0;
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" onClick={() => navigate("/purchase-orders")}>
-              <ArrowLeft className="h-4 w-4 mr-2" /> Back
-            </Button>
-            <div>
-              <h1 className="text-2xl font-bold text-foreground font-mono">{po.poNumber}</h1>
-              <p className="text-muted-foreground mt-1">Supplier: <span className="text-foreground font-medium">{po.supplier}</span></p>
-              {po.createdByName && <p className="text-muted-foreground text-sm mt-0.5">Prepared by: <span className="text-foreground">{po.createdByName}</span></p>}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" className="border-border" onClick={() => window.open(`/api/purchase-orders/${po.id}/pdf`, '_blank')}>
-              <Printer className="h-4 w-4 mr-2" /> Print / PDF
-            </Button>
-            <Dialog open={statusDialogOpen} onOpenChange={setStatusDialogOpen}>
-              <DialogTrigger asChild>
-                <Button variant="outline" className="border-border"><Truck className="h-4 w-4 mr-2" /> Update Status</Button>
-              </DialogTrigger>
-              <DialogContent className="bg-card border-border">
-                <DialogHeader><DialogTitle className="text-foreground">Update PO Status</DialogTitle></DialogHeader>
-                <form onSubmit={handleStatusUpdate} className="space-y-4">
-                  <div>
-                    <Label>Order Status</Label>
-                    <select name="status" defaultValue={po.status} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                      <option value="draft">Draft</option>
-                      <option value="sent">Sent</option>
-                      <option value="received">Received</option>
-                      <option value="cancelled">Cancelled</option>
-                    </select>
-                  </div>
-                  <div>
-                    <Label>Delivery Status</Label>
-                    <select name="deliveryStatus" defaultValue={po.deliveryStatus} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                      <option value="not_delivered">Not Delivered</option>
-                      <option value="partially_delivered">Partially Delivered</option>
-                      <option value="fully_delivered">Fully Delivered</option>
-                    </select>
-                  </div>
-                  <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
-                    {updateMutation.isPending ? "Updating..." : "Update Status"}
-                  </Button>
-                </form>
-              </DialogContent>
-            </Dialog>
-            <Dialog open={paymentDialogOpen} onOpenChange={setPaymentDialogOpen}>
-              <DialogTrigger asChild>
-                <Button className="bg-primary text-primary-foreground"><CreditCard className="h-4 w-4 mr-2" /> Record Payment</Button>
-              </DialogTrigger>
-              <DialogContent className="bg-card border-border">
-                <DialogHeader><DialogTitle className="text-foreground">Record Payment</DialogTitle></DialogHeader>
-                <form onSubmit={handleAddPayment} className="space-y-4">
-                  <div>
-                    <Label>Amount (₱) *</Label>
-                    <Input name="amount" type="number" step="0.01" required className="bg-input border-border" placeholder={`Balance: ₱${balance.toLocaleString()}`} />
-                  </div>
-                  <div>
-                    <Label>Payment Date *</Label>
-                    <Input name="paymentDate" type="date" required className="bg-input border-border" defaultValue={new Date().toISOString().split("T")[0]} />
-                  </div>
-                  <div>
-                    <Label>Payment Method</Label>
-                    <Select value={paymentMethod} onValueChange={setPaymentMethod}>
-                      <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Select method..." /></SelectTrigger>
-                      <SelectContent>
-                        {paymentMethods?.map((m: any) => (
-                          <SelectItem key={m.id} value={m.value}>{m.value}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <Label>Reference (Check #, Transfer Ref, etc.)</Label>
-                    <Input name="reference" className="bg-input border-border" placeholder="e.g. CHK-12345 or BT-2024-001" />
-                  </div>
-                  <div>
-                    <Label>Notes</Label>
-                    <Textarea name="notes" className="bg-input border-border" />
-                  </div>
-                  <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={addPaymentMutation.isPending}>
-                    {addPaymentMutation.isPending ? "Recording..." : "Record Payment"}
-                  </Button>
-                </form>
-              </DialogContent>
-            </Dialog>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="sm" onClick={() => navigate("/purchase-orders")}>
+            <ArrowLeft className="h-4 w-4 mr-2" /> Back
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground font-mono">{po.poNumber}</h1>
+            <p className="text-muted-foreground mt-1">Supplier: <span className="text-foreground font-medium">{po.supplier}</span></p>
+            {po.createdByName && <p className="text-muted-foreground text-sm mt-0.5">Prepared by: <span className="text-foreground">{po.createdByName}</span></p>}
           </div>
         </div>
-
-        {/* Status Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Card className="bg-card border-border">
-            <CardContent className="p-4">
-              <p className="text-xs text-muted-foreground mb-1">Order Status</p>
-              <Badge variant="outline" className={statusColors[po.status]}>{po.status}</Badge>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4">
-              <p className="text-xs text-muted-foreground mb-1">Delivery</p>
-              <Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4">
-              <p className="text-xs text-muted-foreground mb-1">Payment</p>
-              <Badge variant="outline" className={paymentStatusColors[po.paymentStatus]}>{paymentStatusLabels[po.paymentStatus]}</Badge>
-            </CardContent>
-          </Card>
-          <Card className="bg-card border-border">
-            <CardContent className="p-4">
-              <p className="text-xs text-muted-foreground mb-1">Balance</p>
-              <p className="text-lg font-bold text-foreground">₱{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-              <p className="text-xs text-muted-foreground">of ₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-            </CardContent>
-          </Card>
+        <div className="flex gap-2">
+          <Button variant="outline" className="border-border" onClick={() => window.open(`/api/purchase-orders/${po.id}/pdf`, '_blank')}>
+            <Printer className="h-4 w-4 mr-2" /> Print / PDF
+          </Button>
+          <Dialog open={statusDialogOpen} onOpenChange={setStatusDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="border-border"><Truck className="h-4 w-4 mr-2" /> Update Status</Button>
+            </DialogTrigger>
+            <DialogContent className="bg-card border-border">
+              <DialogHeader><DialogTitle className="text-foreground">Update PO Status</DialogTitle></DialogHeader>
+              <form onSubmit={handleStatusUpdate} className="space-y-4">
+                <div>
+                  <Label>Order Status</Label>
+                  <select name="status" defaultValue={po.status} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                    <option value="draft">Draft</option>
+                    <option value="sent">Sent</option>
+                    <option value="received">Received</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </div>
+                <div>
+                  <Label>Delivery Status</Label>
+                  <select name="deliveryStatus" defaultValue={po.deliveryStatus} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                    <option value="not_delivered">Not Delivered</option>
+                    <option value="partially_delivered">Partially Delivered</option>
+                    <option value="fully_delivered">Fully Delivered</option>
+                  </select>
+                </div>
+                <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
+                  {updateMutation.isPending ? "Updating..." : "Update Status"}
+                </Button>
+              </form>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={paymentDialogOpen} onOpenChange={setPaymentDialogOpen}>
+            <DialogTrigger asChild>
+              <Button className="bg-primary text-primary-foreground"><CreditCard className="h-4 w-4 mr-2" /> Record Payment</Button>
+            </DialogTrigger>
+            <DialogContent className="bg-card border-border">
+              <DialogHeader><DialogTitle className="text-foreground">Record Payment</DialogTitle></DialogHeader>
+              <form onSubmit={handleAddPayment} className="space-y-4">
+                <div>
+                  <Label>Amount (₱) *</Label>
+                  <Input name="amount" type="number" step="0.01" required className="bg-input border-border" placeholder={`Balance: ₱${balance.toLocaleString()}`} />
+                </div>
+                <div>
+                  <Label>Payment Date *</Label>
+                  <Input name="paymentDate" type="date" required className="bg-input border-border" defaultValue={new Date().toISOString().split("T")[0]} />
+                </div>
+                <div>
+                  <Label>Payment Method</Label>
+                  <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                    <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Select method..." /></SelectTrigger>
+                    <SelectContent>
+                      {paymentMethods?.map((m: any) => (
+                        <SelectItem key={m.id} value={m.value}>{m.value}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Reference (Check #, Transfer Ref, etc.)</Label>
+                  <Input name="reference" className="bg-input border-border" placeholder="e.g. CHK-12345 or BT-2024-001" />
+                </div>
+                <div>
+                  <Label>Notes</Label>
+                  <Textarea name="notes" className="bg-input border-border" />
+                </div>
+                <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={addPaymentMutation.isPending}>
+                  {addPaymentMutation.isPending ? "Recording..." : "Record Payment"}
+                </Button>
+              </form>
+            </DialogContent>
+          </Dialog>
         </div>
+      </div>
 
-        {/* Line Items */}
+      {/* Status Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="bg-card border-border">
-          <CardHeader>
-            <CardTitle className="text-foreground flex items-center gap-2"><Package className="h-5 w-5" /> Line Items ({po.items?.length || 0})</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-1">Order Status</p>
+            <Badge variant="outline" className={statusColors[po.status]}>{po.status}</Badge>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-1">Delivery</p>
+            <Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-1">Payment</p>
+            <Badge variant="outline" className={paymentStatusColors[po.paymentStatus]}>{paymentStatusLabels[po.paymentStatus]}</Badge>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground mb-1">Balance</p>
+            <p className="text-lg font-bold text-foreground">₱{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+            <p className="text-xs text-muted-foreground">of ₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Line Items */}
+      <Card className="bg-card border-border">
+        <CardHeader>
+          <CardTitle className="text-foreground flex items-center gap-2"><Package className="h-5 w-5" /> Line Items ({po.items?.length || 0})</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">SKU</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Item</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Description</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Unit</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Qty</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Unit Price</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Line Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {po.items?.map((item: any) => (
+                  <tr key={item.id} className="border-b border-border/50">
+                    <td className="p-4 text-sm font-mono text-muted-foreground">{item.itemSku}</td>
+                    <td className="p-4 font-medium text-foreground">{item.itemName}</td>
+                    <td className="p-4 text-sm text-muted-foreground">{item.description || "-"}</td>
+                    <td className="p-4 text-sm text-muted-foreground">{item.unit || "pcs"}</td>
+                    <td className="p-4 text-sm text-foreground text-right">{item.quantity}</td>
+                    <td className="p-4 text-sm text-foreground text-right">₱{Number(item.unitPrice || 0).toLocaleString()}</td>
+                    <td className="p-4 text-sm font-medium text-foreground text-right">₱{Number(item.lineTotal || 0).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-border">
+                  <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">Subtotal:</td>
+                  <td className="p-4 text-right font-medium text-foreground">₱{poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                </tr>
+                {poDiscountAmount > 0 && (
+                  <tr>
+                    <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">
+                      Discount ({poDiscountType === "percentage" ? `${poDiscountValue}%` : "Fixed"}):
+                    </td>
+                    <td className="p-4 text-right font-medium text-red-400">-₱{poDiscountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                  </tr>
+                )}
+                {poVatEnabled && (
+                  <tr>
+                    <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">VAT ({poVatRate}%):</td>
+                    <td className="p-4 text-right font-medium text-foreground">₱{poVatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                  </tr>
+                )}
+                <tr className="border-t border-border">
+                  <td colSpan={6} className="p-4 text-right font-medium text-foreground">Grand Total:</td>
+                  <td className="p-4 text-right font-bold text-foreground text-lg">₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Payment Records */}
+      <Card className="bg-card border-border">
+        <CardHeader>
+          <CardTitle className="text-foreground flex items-center gap-2"><CreditCard className="h-5 w-5" /> Payment Records</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {!po.payments || po.payments.length === 0 ? (
+            <p className="p-6 text-center text-muted-foreground">No payments recorded yet.</p>
+          ) : (
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border">
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">SKU</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Item</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Description</th>
-                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Unit</th>
-                    <th className="text-right p-4 text-sm font-medium text-muted-foreground">Qty</th>
-                    <th className="text-right p-4 text-sm font-medium text-muted-foreground">Unit Price</th>
-                    <th className="text-right p-4 text-sm font-medium text-muted-foreground">Line Total</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Date</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Amount</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Method</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Reference</th>
+                    <th className="text-left p-4 text-sm font-medium text-muted-foreground">Notes</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {po.items?.map((item: any) => (
-                    <tr key={item.id} className="border-b border-border/50">
-                      <td className="p-4 text-sm font-mono text-muted-foreground">{item.itemSku}</td>
-                      <td className="p-4 font-medium text-foreground">{item.itemName}</td>
-                      <td className="p-4 text-sm text-muted-foreground">{item.description || "-"}</td>
-                      <td className="p-4 text-sm text-muted-foreground">{item.unit || "pcs"}</td>
-                      <td className="p-4 text-sm text-foreground text-right">{item.quantity}</td>
-                      <td className="p-4 text-sm text-foreground text-right">₱{Number(item.unitPrice || 0).toLocaleString()}</td>
-                      <td className="p-4 text-sm font-medium text-foreground text-right">₱{Number(item.lineTotal || 0).toLocaleString()}</td>
+                  {po.payments.map((payment: any) => (
+                    <tr key={payment.id} className="border-b border-border/50">
+                      <td className="p-4 text-sm text-foreground">{new Date(payment.paymentDate).toLocaleDateString()}</td>
+                      <td className="p-4 font-medium text-foreground">₱{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{payment.paymentMethod || "-"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{payment.reference || "-"}</td>
+                      <td className="p-4 text-sm text-muted-foreground">{payment.notes || "-"}</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-border">
-                    <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">Subtotal:</td>
-                    <td className="p-4 text-right font-medium text-foreground">₱{poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                  </tr>
-                  {poDiscountAmount > 0 && (
-                    <tr>
-                      <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">
-                        Discount ({poDiscountType === "percentage" ? `${poDiscountValue}%` : "Fixed"}):
-                      </td>
-                      <td className="p-4 text-right font-medium text-red-400">-₱{poDiscountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                    </tr>
-                  )}
-                  {poVatEnabled && (
-                    <tr>
-                      <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">VAT ({poVatRate}%):</td>
-                      <td className="p-4 text-right font-medium text-foreground">₱{poVatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                    </tr>
-                  )}
-                  <tr className="border-t border-border">
-                    <td colSpan={6} className="p-4 text-right font-medium text-foreground">Grand Total:</td>
-                    <td className="p-4 text-right font-bold text-foreground text-lg">₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td className="p-4 font-medium text-foreground">Total Paid:</td>
+                    <td className="p-4 font-bold text-green-400">₱{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td colSpan={3}></td>
                   </tr>
                 </tfoot>
               </table>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </CardContent>
+      </Card>
 
-        {/* Payment Records */}
+      {/* Notes */}
+      {po.notes && (
         <Card className="bg-card border-border">
-          <CardHeader>
-            <CardTitle className="text-foreground flex items-center gap-2"><CreditCard className="h-5 w-5" /> Payment Records</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {!po.payments || po.payments.length === 0 ? (
-              <p className="p-6 text-center text-muted-foreground">No payments recorded yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Date</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Amount</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Method</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Reference</th>
-                      <th className="text-left p-4 text-sm font-medium text-muted-foreground">Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {po.payments.map((payment: any) => (
-                      <tr key={payment.id} className="border-b border-border/50">
-                        <td className="p-4 text-sm text-foreground">{new Date(payment.paymentDate).toLocaleDateString()}</td>
-                        <td className="p-4 font-medium text-foreground">₱{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{payment.paymentMethod || "-"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{payment.reference || "-"}</td>
-                        <td className="p-4 text-sm text-muted-foreground">{payment.notes || "-"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t border-border">
-                      <td className="p-4 font-medium text-foreground">Total Paid:</td>
-                      <td className="p-4 font-bold text-green-400">₱{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                      <td colSpan={3}></td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
+          <CardHeader><CardTitle className="text-foreground text-lg">Notes</CardTitle></CardHeader>
+          <CardContent>
+            <p className="text-muted-foreground whitespace-pre-wrap">{po.notes}</p>
           </CardContent>
         </Card>
-
-        {/* Notes */}
-        {po.notes && (
-          <Card className="bg-card border-border">
-            <CardHeader><CardTitle className="text-foreground text-lg">Notes</CardTitle></CardHeader>
-            <CardContent>
-              <p className="text-muted-foreground whitespace-pre-wrap">{po.notes}</p>
-            </CardContent>
-          </Card>
-        )}
-      </div>
-    </DashboardLayout>
+      )}
+    </div>
   );
 }

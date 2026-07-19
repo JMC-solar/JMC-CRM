@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -153,300 +152,294 @@ export default function ProjectDetail() {
 
   if (isLoading) {
     return (
-      <DashboardLayout>
-        <div className="p-8 text-center text-muted-foreground">Loading project...</div>
-      </DashboardLayout>
+      <div className="p-8 text-center text-muted-foreground">Loading project...</div>
     );
   }
 
   if (!project) {
     return (
-      <DashboardLayout>
-        <div className="p-8 text-center text-muted-foreground">Project not found.</div>
-      </DashboardLayout>
+      <div className="p-8 text-center text-muted-foreground">Project not found.</div>
     );
   }
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" onClick={() => navigate("/projects")} className="text-muted-foreground">
-              <ArrowLeft className="h-4 w-4 mr-1" /> Back
-            </Button>
-            <div>
-              <h1 className="text-2xl font-bold text-foreground">{project.name}</h1>
-              <p className="text-muted-foreground text-sm mt-0.5">{project.customerName || "No customer assigned"} {project.sizeOfSetup ? `• ${project.sizeOfSetup}` : ""} {project.typeOfSetup ? `• ${project.typeOfSetup}` : ""}</p>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={openEditDialog} className="border-border">
-              <Edit className="h-4 w-4 mr-2" /> Edit
-            </Button>
-            <Button onClick={() => { setNewStage(""); setIsStageDialogOpen(true); }} className="bg-primary text-primary-foreground">
-              Update Stage
-            </Button>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="sm" onClick={() => navigate("/projects")} className="text-muted-foreground">
+            <ArrowLeft className="h-4 w-4 mr-1" /> Back
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">{project.name}</h1>
+            <p className="text-muted-foreground text-sm mt-0.5">{project.customerName || "No customer assigned"} {project.sizeOfSetup ? `• ${project.sizeOfSetup}` : ""} {project.typeOfSetup ? `• ${project.typeOfSetup}` : ""}</p>
           </div>
         </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={openEditDialog} className="border-border">
+            <Edit className="h-4 w-4 mr-2" /> Edit
+          </Button>
+          <Button onClick={() => { setNewStage(""); setIsStageDialogOpen(true); }} className="bg-primary text-primary-foreground">
+            Update Stage
+          </Button>
+        </div>
+      </div>
 
-        {/* Progress Stepper */}
-        <Card className="bg-card border-border">
-          <CardContent className="p-6">
-            <ProgressStepper currentStage={project.stage} />
-          </CardContent>
-        </Card>
+      {/* Progress Stepper */}
+      <Card className="bg-card border-border">
+        <CardContent className="p-6">
+          <ProgressStepper currentStage={project.stage} />
+        </CardContent>
+      </Card>
 
-        {/* Tabs: Details / History */}
-        <Tabs defaultValue="details" className="w-full">
-          <TabsList className="bg-muted/30 border border-border">
-            <TabsTrigger value="details">Project Details</TabsTrigger>
-            <TabsTrigger value="payments">Payments</TabsTrigger>
-            <TabsTrigger value="net-metering">Net Metering</TabsTrigger>
-            <TabsTrigger value="nm-payments">NM Payments</TabsTrigger>
-            <TabsTrigger value="history">Status History</TabsTrigger>
-            <TabsTrigger value="receipts">Receipts</TabsTrigger>
-          </TabsList>
+      {/* Tabs: Details / History */}
+      <Tabs defaultValue="details" className="w-full">
+        <TabsList className="bg-muted/30 border border-border">
+          <TabsTrigger value="details">Project Details</TabsTrigger>
+          <TabsTrigger value="payments">Payments</TabsTrigger>
+          <TabsTrigger value="net-metering">Net Metering</TabsTrigger>
+          <TabsTrigger value="nm-payments">NM Payments</TabsTrigger>
+          <TabsTrigger value="history">Status History</TabsTrigger>
+          <TabsTrigger value="receipts">Receipts</TabsTrigger>
+        </TabsList>
 
-          <TabsContent value="details" className="mt-4">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card className="bg-card border-border">
-                <CardHeader><CardTitle className="text-foreground text-lg">Project Information</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Project Name</p>
-                      <p className="text-foreground font-medium">{project.name}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Type of Setup</p>
-                      <p className="text-foreground">{project.typeOfSetup || "-"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Size of Setup</p>
-                      <p className="text-foreground">{project.sizeOfSetup || "-"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Current Stage</p>
-                      <Badge className={`${STAGES.find(s => s.value === project.stage)?.bgColor || "bg-muted"} text-white text-xs mt-1`}>
-                        {STAGES.find(s => s.value === project.stage)?.label || project.stage}
-                      </Badge>
-                    </div>
-                  </div>
-                  {project.description && (
-                    <div>
-                      <p className="text-xs text-muted-foreground">Description</p>
-                      <p className="text-foreground text-sm mt-1">{project.description}</p>
-                    </div>
-                  )}
-                  {project.notes && (
-                    <div>
-                      <p className="text-xs text-muted-foreground">Notes</p>
-                      <p className="text-foreground text-sm mt-1">{project.notes}</p>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card className="bg-card border-border">
-                <CardHeader><CardTitle className="text-foreground text-lg">Customer & Schedule</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Customer Name</p>
-                      <p className="text-foreground">{project.customerName || "-"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Address / Location</p>
-                      <p className="text-foreground">{project.address || "-"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Start Date</p>
-                      <p className="text-foreground">{project.startDate ? new Date(project.startDate).toLocaleDateString() : "-"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Target Completion</p>
-                      <p className="text-foreground">{project.targetCompletionDate ? new Date(project.targetCompletionDate).toLocaleDateString() : "-"}</p>
-                    </div>
-                    {project.completedDate && (
-                      <div>
-                        <p className="text-xs text-muted-foreground">Completed Date</p>
-                        <p className="text-green-400">{new Date(project.completedDate).toLocaleDateString()}</p>
-                      </div>
-                    )}
-                  </div>
-                  {project.opportunityId && (
-                    <div>
-                      <p className="text-xs text-muted-foreground">Linked Opportunity</p>
-                      <p className="text-primary cursor-pointer hover:underline" onClick={() => navigate("/opportunities")}>Opportunity #{project.opportunityId}</p>
-                    </div>
-                  )}
-                  {project.quotationId && (
-                    <div>
-                      <p className="text-xs text-muted-foreground">Linked Quotation</p>
-                      <p className="text-primary cursor-pointer hover:underline" onClick={() => navigate("/quotations")}>Quotation #{project.quotationId}</p>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="history" className="mt-4">
+        <TabsContent value="details" className="mt-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card className="bg-card border-border">
-              <CardHeader><CardTitle className="text-foreground text-lg">Status Change History</CardTitle></CardHeader>
-              <CardContent>
-                {!history?.length ? (
-                  <p className="text-muted-foreground text-sm">No status changes recorded yet.</p>
-                ) : (
-                  <div className="space-y-4">
-                    {history.map((entry: any) => (
-                      <div key={entry.id} className="flex items-start gap-4 p-3 rounded-md border border-border/30 bg-muted/10">
-                        <div className="mt-1">
-                          <Clock className="h-4 w-4 text-muted-foreground" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2">
-                            {entry.fromStage && (
-                              <>
-                                <Badge variant="outline" className="text-xs border-border">{STAGES.find(s => s.value === entry.fromStage)?.label || entry.fromStage}</Badge>
-                                <span className="text-muted-foreground">→</span>
-                              </>
-                            )}
-                            <Badge className={`${STAGES.find(s => s.value === entry.toStage)?.bgColor || "bg-muted"} text-white text-xs`}>
-                              {STAGES.find(s => s.value === entry.toStage)?.label || entry.toStage}
-                            </Badge>
-                          </div>
-                          {entry.notes && <p className="text-sm text-muted-foreground mt-1">{entry.notes}</p>}
-                          <p className="text-xs text-muted-foreground mt-2">
-                            by {entry.changedByName || "Unknown"} • {new Date(entry.createdAt).toLocaleString()}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
+              <CardHeader><CardTitle className="text-foreground text-lg">Project Information</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Project Name</p>
+                    <p className="text-foreground font-medium">{project.name}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Type of Setup</p>
+                    <p className="text-foreground">{project.typeOfSetup || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Size of Setup</p>
+                    <p className="text-foreground">{project.sizeOfSetup || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Current Stage</p>
+                    <Badge className={`${STAGES.find(s => s.value === project.stage)?.bgColor || "bg-muted"} text-white text-xs mt-1`}>
+                      {STAGES.find(s => s.value === project.stage)?.label || project.stage}
+                    </Badge>
+                  </div>
+                </div>
+                {project.description && (
+                  <div>
+                    <p className="text-xs text-muted-foreground">Description</p>
+                    <p className="text-foreground text-sm mt-1">{project.description}</p>
+                  </div>
+                )}
+                {project.notes && (
+                  <div>
+                    <p className="text-xs text-muted-foreground">Notes</p>
+                    <p className="text-foreground text-sm mt-1">{project.notes}</p>
                   </div>
                 )}
               </CardContent>
             </Card>
-          </TabsContent>
 
-          <TabsContent value="payments" className="mt-4">
-            <PaymentsSection projectId={projectId} />
-          </TabsContent>
+            <Card className="bg-card border-border">
+              <CardHeader><CardTitle className="text-foreground text-lg">Customer & Schedule</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Customer Name</p>
+                    <p className="text-foreground">{project.customerName || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Address / Location</p>
+                    <p className="text-foreground">{project.address || "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Start Date</p>
+                    <p className="text-foreground">{project.startDate ? new Date(project.startDate).toLocaleDateString() : "-"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Target Completion</p>
+                    <p className="text-foreground">{project.targetCompletionDate ? new Date(project.targetCompletionDate).toLocaleDateString() : "-"}</p>
+                  </div>
+                  {project.completedDate && (
+                    <div>
+                      <p className="text-xs text-muted-foreground">Completed Date</p>
+                      <p className="text-green-400">{new Date(project.completedDate).toLocaleDateString()}</p>
+                    </div>
+                  )}
+                </div>
+                {project.opportunityId && (
+                  <div>
+                    <p className="text-xs text-muted-foreground">Linked Opportunity</p>
+                    <p className="text-primary cursor-pointer hover:underline" onClick={() => navigate("/opportunities")}>Opportunity #{project.opportunityId}</p>
+                  </div>
+                )}
+                {project.quotationId && (
+                  <div>
+                    <p className="text-xs text-muted-foreground">Linked Quotation</p>
+                    <p className="text-primary cursor-pointer hover:underline" onClick={() => navigate("/quotations")}>Quotation #{project.quotationId}</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
 
-          <TabsContent value="net-metering" className="mt-4">
-            <NetMeteringSection projectId={projectId} project={project} />
-          </TabsContent>
+        <TabsContent value="history" className="mt-4">
+          <Card className="bg-card border-border">
+            <CardHeader><CardTitle className="text-foreground text-lg">Status Change History</CardTitle></CardHeader>
+            <CardContent>
+              {!history?.length ? (
+                <p className="text-muted-foreground text-sm">No status changes recorded yet.</p>
+              ) : (
+                <div className="space-y-4">
+                  {history.map((entry: any) => (
+                    <div key={entry.id} className="flex items-start gap-4 p-3 rounded-md border border-border/30 bg-muted/10">
+                      <div className="mt-1">
+                        <Clock className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          {entry.fromStage && (
+                            <>
+                              <Badge variant="outline" className="text-xs border-border">{STAGES.find(s => s.value === entry.fromStage)?.label || entry.fromStage}</Badge>
+                              <span className="text-muted-foreground">→</span>
+                            </>
+                          )}
+                          <Badge className={`${STAGES.find(s => s.value === entry.toStage)?.bgColor || "bg-muted"} text-white text-xs`}>
+                            {STAGES.find(s => s.value === entry.toStage)?.label || entry.toStage}
+                          </Badge>
+                        </div>
+                        {entry.notes && <p className="text-sm text-muted-foreground mt-1">{entry.notes}</p>}
+                        <p className="text-xs text-muted-foreground mt-2">
+                          by {entry.changedByName || "Unknown"} • {new Date(entry.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-          <TabsContent value="nm-payments" className="mt-4">
-            <NetMeteringPaymentsSection projectId={projectId} />
-          </TabsContent>
+        <TabsContent value="payments" className="mt-4">
+          <PaymentsSection projectId={projectId} />
+        </TabsContent>
 
-          <TabsContent value="receipts" className="mt-4">
-            <ReceiptHistorySection projectId={projectId} />
-          </TabsContent>
-        </Tabs>
+        <TabsContent value="net-metering" className="mt-4">
+          <NetMeteringSection projectId={projectId} project={project} />
+        </TabsContent>
 
-        {/* Update Stage Dialog */}
-        <Dialog open={isStageDialogOpen} onOpenChange={setIsStageDialogOpen}>
-          <DialogContent className="max-w-md bg-card border-border">
-            <DialogHeader><DialogTitle className="text-foreground">Update Project Stage</DialogTitle></DialogHeader>
-            <div className="space-y-4">
+        <TabsContent value="nm-payments" className="mt-4">
+          <NetMeteringPaymentsSection projectId={projectId} />
+        </TabsContent>
+
+        <TabsContent value="receipts" className="mt-4">
+          <ReceiptHistorySection projectId={projectId} />
+        </TabsContent>
+      </Tabs>
+
+      {/* Update Stage Dialog */}
+      <Dialog open={isStageDialogOpen} onOpenChange={setIsStageDialogOpen}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">Update Project Stage</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Current Stage</Label>
+              <Badge className={`${STAGES.find(s => s.value === project.stage)?.bgColor || "bg-muted"} text-white text-xs mt-1 block w-fit`}>
+                {STAGES.find(s => s.value === project.stage)?.label || project.stage}
+              </Badge>
+            </div>
+            <div>
+              <Label>Move to Stage *</Label>
+              <select value={newStage} onChange={(e) => setNewStage(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                <option value="">Select new stage...</option>
+                {STAGES.filter(s => s.value !== project.stage).map((s) => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <Label>Notes (optional)</Label>
+              <Textarea value={stageNotes} onChange={(e) => setStageNotes(e.target.value)} placeholder="Reason for stage change..." className="bg-input border-border" rows={3} />
+            </div>
+            <Button onClick={handleStageUpdate} disabled={!newStage || updateStageMutation.isPending} className="w-full bg-primary text-primary-foreground">
+              {updateStageMutation.isPending ? "Updating..." : "Update Stage"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Project Dialog */}
+      <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Edit Project</DialogTitle></DialogHeader>
+          <form onSubmit={handleEdit} className="space-y-4">
+            <div><Label>Project Name *</Label><Input name="name" defaultValue={project.name} required className="bg-input border-border" /></div>
+            <div><Label>Description</Label><Textarea name="description" defaultValue={project.description || ""} className="bg-input border-border" rows={2} /></div>
+            <div className="grid grid-cols-2 gap-4">
+              <div><Label>Size of Setup</Label><Input name="sizeOfSetup" defaultValue={project.sizeOfSetup || ""} className="bg-input border-border" /></div>
               <div>
-                <Label>Current Stage</Label>
-                <Badge className={`${STAGES.find(s => s.value === project.stage)?.bgColor || "bg-muted"} text-white text-xs mt-1 block w-fit`}>
-                  {STAGES.find(s => s.value === project.stage)?.label || project.stage}
-                </Badge>
+                <Label>Type of Setup</Label>
+                <select name="typeOfSetup" defaultValue={project.typeOfSetup || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">-- Select Type --</option>
+                  {setupTypes?.map((opt: any) => <option key={opt.id} value={opt.value}>{opt.value}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Customer Name</Label>
+                <ContactCombobox
+                  value={editContact}
+                  onChange={handleContactChange}
+                  fallbackLabel={project.customerName}
+                  placeholder="Search contacts..."
+                />
               </div>
               <div>
-                <Label>Move to Stage *</Label>
-                <select value={newStage} onChange={(e) => setNewStage(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                  <option value="">Select new stage...</option>
-                  {STAGES.filter(s => s.value !== project.stage).map((s) => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                  ))}
+                <Label>Address / Location</Label>
+                <Input
+                  value={editAddress}
+                  onChange={(e) => setEditAddress(e.target.value)}
+                  className="bg-input border-border"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div><Label>Total Project Amount</Label><Input name="totalProjectAmount" type="number" step="0.01" defaultValue={project.totalProjectAmount || ""} placeholder="0.00" className="bg-input border-border" /></div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div><Label>Start Date</Label><Input name="startDate" type="date" defaultValue={project.startDate ? new Date(project.startDate).toISOString().split("T")[0] : ""} className="bg-input border-border" /></div>
+              <div><Label>Target Completion</Label><Input name="targetCompletionDate" type="date" defaultValue={project.targetCompletionDate ? new Date(project.targetCompletionDate).toISOString().split("T")[0] : ""} className="bg-input border-border" /></div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Linked Opportunity</Label>
+                <select name="opportunityId" defaultValue={project.opportunityId || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">-- None --</option>
+                  {opportunitiesList?.map((opp: any) => <option key={opp.id} value={opp.id}>{opp.title}</option>)}
                 </select>
               </div>
               <div>
-                <Label>Notes (optional)</Label>
-                <Textarea value={stageNotes} onChange={(e) => setStageNotes(e.target.value)} placeholder="Reason for stage change..." className="bg-input border-border" rows={3} />
+                <Label>Linked Quotation</Label>
+                <select name="quotationId" defaultValue={project.quotationId || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">-- None --</option>
+                  {quotationsList?.items?.map((q: any) => <option key={q.id} value={q.id}>{q.quoteNumber} - {q.customerName || "Unnamed"}</option>)}
+                </select>
               </div>
-              <Button onClick={handleStageUpdate} disabled={!newStage || updateStageMutation.isPending} className="w-full bg-primary text-primary-foreground">
-                {updateStageMutation.isPending ? "Updating..." : "Update Stage"}
-              </Button>
             </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Edit Project Dialog */}
-        <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
-          <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
-            <DialogHeader><DialogTitle className="text-foreground">Edit Project</DialogTitle></DialogHeader>
-            <form onSubmit={handleEdit} className="space-y-4">
-              <div><Label>Project Name *</Label><Input name="name" defaultValue={project.name} required className="bg-input border-border" /></div>
-              <div><Label>Description</Label><Textarea name="description" defaultValue={project.description || ""} className="bg-input border-border" rows={2} /></div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><Label>Size of Setup</Label><Input name="sizeOfSetup" defaultValue={project.sizeOfSetup || ""} className="bg-input border-border" /></div>
-                <div>
-                  <Label>Type of Setup</Label>
-                  <select name="typeOfSetup" defaultValue={project.typeOfSetup || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">-- Select Type --</option>
-                    {setupTypes?.map((opt: any) => <option key={opt.id} value={opt.value}>{opt.value}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label>Customer Name</Label>
-                  <ContactCombobox
-                    value={editContact}
-                    onChange={handleContactChange}
-                    fallbackLabel={project.customerName}
-                    placeholder="Search contacts..."
-                  />
-                </div>
-                <div>
-                  <Label>Address / Location</Label>
-                  <Input
-                    value={editAddress}
-                    onChange={(e) => setEditAddress(e.target.value)}
-                    className="bg-input border-border"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><Label>Total Project Amount</Label><Input name="totalProjectAmount" type="number" step="0.01" defaultValue={project.totalProjectAmount || ""} placeholder="0.00" className="bg-input border-border" /></div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><Label>Start Date</Label><Input name="startDate" type="date" defaultValue={project.startDate ? new Date(project.startDate).toISOString().split("T")[0] : ""} className="bg-input border-border" /></div>
-                <div><Label>Target Completion</Label><Input name="targetCompletionDate" type="date" defaultValue={project.targetCompletionDate ? new Date(project.targetCompletionDate).toISOString().split("T")[0] : ""} className="bg-input border-border" /></div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label>Linked Opportunity</Label>
-                  <select name="opportunityId" defaultValue={project.opportunityId || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">-- None --</option>
-                    {opportunitiesList?.map((opp: any) => <option key={opp.id} value={opp.id}>{opp.title}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <Label>Linked Quotation</Label>
-                  <select name="quotationId" defaultValue={project.quotationId || ""} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">-- None --</option>
-                    {quotationsList?.items?.map((q: any) => <option key={q.id} value={q.id}>{q.quoteNumber} - {q.customerName || "Unnamed"}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div><Label>Notes</Label><Textarea name="notes" defaultValue={project.notes || ""} className="bg-input border-border" rows={2} /></div>
-              <Button type="submit" disabled={updateMutation.isPending} className="w-full bg-primary text-primary-foreground">
-                {updateMutation.isPending ? "Saving..." : "Save Changes"}
-              </Button>
-            </form>
-          </DialogContent>
-        </Dialog>
-      </div>
-    </DashboardLayout>
+            <div><Label>Notes</Label><Textarea name="notes" defaultValue={project.notes || ""} className="bg-input border-border" rows={2} /></div>
+            <Button type="submit" disabled={updateMutation.isPending} className="w-full bg-primary text-primary-foreground">
+              {updateMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 

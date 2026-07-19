@@ -1,10 +1,11 @@
 import { Router } from "express";
 import { getById, listAll } from "./firestore";
 import type { Quotation, QuotationItem, Account } from "./models";
+import { requireAuth } from "./_core/requireAuth";
 
 const router = Router();
 
-router.get("/api/quotations/:id/pdf", async (req, res) => {
+router.get("/api/quotations/:id/pdf", requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const quotation = await getById<Quotation>("quotations", id);

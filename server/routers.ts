@@ -55,6 +55,8 @@ import type {
   SpecialQuotation,
   CashRequest,
   Notification,
+  RetailSale,
+  RetailSaleItem,
 } from "./models";
 import { money } from "./models";
 import { z } from "zod";
@@ -68,6 +70,18 @@ async function recalcBomTotalCost(packageId: number): Promise<void> {
   const itemMap = new Map(items.map(i => [i.id, i]));
   const totalCost = bomItems.reduce((sum, bi) => sum + bi.quantity * Number(itemMap.get(bi.itemId)?.sellingPrice || 0), 0);
   await fsUpdateOne("bom_packages", packageId, { totalCost: money(totalCost) });
+}
+
+/** "First Last" for contacts/leads, trimmed; a missing lastName is dropped rather than left as a trailing space. */
+function personName(p: { firstName: string; lastName: string | null }): string | null {
+  return [p.firstName, p.lastName].filter(Boolean).join(" ").trim() || null;
+}
+
+/** Null-safe FK -> denormalized name lookup: a null id or a dangling reference both yield null, never a crash. */
+function nameFor<T>(id: number | null, map: Map<number, T>, nameFn: (row: T) => string | null): string | null {
+  if (id == null) return null;
+  const row = map.get(id);
+  return row ? nameFn(row) : null;
 }
 
 /** Recomputes a quotation's subtotal/discountAmount/taxAmount/totalAmount from its line items + header discount/VAT/labor/installation fields. */
@@ -210,13 +224,34 @@ export const appRouter = router({
     list: protectedProcedure.input(z.object({ search: z.string().optional(), status: z.string().optional(), page: z.number().default(1), limit: z.number().default(20) })).query(async ({ input }) => {
       const filters: [string, WhereFilterOp, any][] = [];
       if (input.status) filters.push(["status", "==", input.status]);
-      return fsListPaginated("leads", {
+      const result = (await fsListPaginated("leads", {
         search: input.search,
         searchFields: ["firstName", "lastName", "company", "email", "phone", "source", "systemSize", "notes"],
         filters,
         page: input.page,
         limit: input.limit,
-      });
+      })) as unknown as PaginatedResult<Lead>;
+
+      // Denormalize FK names for the page's rows in 3 batched reads (one per referenced
+      // collection) rather than one Firestore read per lead — see personName/nameFor above.
+      const [contacts, accounts, users] = await Promise.all([
+        fsListAll<Contact>("contacts"),
+        fsListAll<Account>("accounts"),
+        listUsersRaw(),
+      ]);
+      const contactMap = new Map(contacts.map(c => [c.id, c]));
+      const accountMap = new Map(accounts.map(a => [a.id, a]));
+      const userMap = new Map(users.map(u => [u.id, u]));
+
+      return {
+        ...result,
+        items: result.items.map(l => ({
+          ...l,
+          contactName: nameFor(l.contactId, contactMap, personName),
+          accountName: nameFor(l.accountId, accountMap, a => a.name),
+          assignedToName: nameFor(l.assignedTo, userMap, u => u.name),
+        })),
+      };
     }),
     create: protectedProcedure.input(z.object({
       firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
@@ -293,12 +328,18 @@ export const appRouter = router({
       id: z.number(), firstName: z.string().min(1), lastName: z.string().optional(), email: z.string().optional(),
       phone: z.string().optional(), company: z.string().optional(), position: z.string().optional(),
       address: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can edit contacts");
+      }
       const { id, ...data } = input;
       await fsUpdateOne("contacts", id, data);
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can delete contacts");
+      }
       await fsDeleteOne("contacts", input.id);
       await fsAudit(ctx.user.id, ctx.user.name, "delete", "contact", input.id, `Deleted contact #${input.id}`);
       return { success: true };
@@ -325,7 +366,7 @@ export const appRouter = router({
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
-      email: z.string().optional(), website: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
+      email: z.string().optional(), website: z.string().optional(), address: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
       const id = await fsInsertOne("accounts", {
         name: input.name,
@@ -333,7 +374,7 @@ export const appRouter = router({
         phone: input.phone ?? null,
         email: input.email ?? null,
         website: input.website ?? null,
-        address: null,
+        address: input.address ?? null,
         city: input.city ?? null,
         notes: input.notes ?? null,
         createdBy: ctx.user.id,
@@ -343,7 +384,7 @@ export const appRouter = router({
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(), name: z.string().min(1), industry: z.string().optional(), phone: z.string().optional(),
-      email: z.string().optional(), website: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
+      email: z.string().optional(), website: z.string().optional(), address: z.string().optional(), city: z.string().optional(), notes: z.string().optional(),
     })).mutation(async ({ input }) => {
       const { id, ...data } = input;
       await fsUpdateOne("accounts", id, data);
@@ -368,7 +409,27 @@ export const appRouter = router({
         page: 1,
         limit: 200,
       })) as unknown as PaginatedResult<Opportunity>;
-      return result.items;
+
+      // Denormalize FK names for the page's rows in 4 batched reads (one per referenced
+      // collection) rather than one Firestore read per opportunity.
+      const [contacts, accounts, leads, users] = await Promise.all([
+        fsListAll<Contact>("contacts"),
+        fsListAll<Account>("accounts"),
+        fsListAll<Lead>("leads"),
+        listUsersRaw(),
+      ]);
+      const contactMap = new Map(contacts.map(c => [c.id, c]));
+      const accountMap = new Map(accounts.map(a => [a.id, a]));
+      const leadMap = new Map(leads.map(l => [l.id, l]));
+      const userMap = new Map(users.map(u => [u.id, u]));
+
+      return result.items.map(o => ({
+        ...o,
+        contactName: nameFor(o.contactId, contactMap, personName),
+        accountName: nameFor(o.accountId, accountMap, a => a.name),
+        leadName: nameFor(o.leadId, leadMap, personName),
+        assignedToName: nameFor(o.assignedTo, userMap, u => u.name),
+      }));
     }),
     listAll: protectedProcedure.query(async () => {
       const result = (await fsListPaginated("opportunities", {
@@ -431,10 +492,28 @@ export const appRouter = router({
           return false;
         });
       }
-      return items
+      const page = items
         .slice()
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
         .slice(0, 200);
+
+      // Denormalize FK names for the page's rows in 3 batched reads (one per referenced
+      // collection) rather than one Firestore read per activity.
+      const [contacts, opportunities, leads] = await Promise.all([
+        fsListAll<Contact>("contacts"),
+        fsListAll<Opportunity>("opportunities"),
+        fsListAll<Lead>("leads"),
+      ]);
+      const contactMap = new Map(contacts.map(c => [c.id, c]));
+      const opportunityMap = new Map(opportunities.map(o => [o.id, o]));
+      const leadMap = new Map(leads.map(l => [l.id, l]));
+
+      return page.map(a => ({
+        ...a,
+        contactName: nameFor(a.contactId, contactMap, personName),
+        opportunityName: nameFor(a.opportunityId, opportunityMap, o => o.title),
+        leadName: nameFor(a.leadId, leadMap, personName),
+      }));
     }),
     create: protectedProcedure.input(z.object({
       type: z.string(), subject: z.string().min(1), description: z.string().optional(),
@@ -841,6 +920,318 @@ export const appRouter = router({
     }),
   }),
 
+  // ============ RETAIL SALES ============
+  // Walk-in product sales: a customer + multiple inventory line items, distinct from
+  // the Projects (installation job) flow. Creating/editing/deleting is admin or
+  // sub-admin only (no subadmin middleware exists — see the inline role checks below,
+  // matching the idiom used for user creation around line ~1751).
+  retail: router({
+    list: protectedProcedure.input(z.object({
+      search: z.string().optional(),
+      page: z.number().min(1).default(1),
+      limit: z.number().min(1).max(100).default(20),
+    }).optional()).query(async ({ input, ctx }) => {
+      // Reads are gated too, not just writes: the sidebar hides Retail from the limited
+      // roles, but the endpoint is callable directly and exposes customer names, line
+      // items, and prices.
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can view retail sales");
+      }
+      const { search, page = 1, limit = 20 } = input || {};
+      const [allSales, contacts, allLineItems] = await Promise.all([
+        fsListAll<RetailSale>("retail_sales"),
+        fsListAll<Contact>("contacts"),
+        fsListAll<RetailSaleItem>("retail_sale_items"),
+      ]);
+      const contactMap = new Map(contacts.map(c => [c.id, c]));
+      // Counted here so the list page doesn't have to fire a retail.get per row just
+      // to show how many items a sale had.
+      const itemCountBySale = new Map<number, number>();
+      allLineItems.forEach(li => {
+        itemCountBySale.set(li.retailSaleId, (itemCountBySale.get(li.retailSaleId) ?? 0) + 1);
+      });
+      let items = allSales;
+      if (search) {
+        const s = search.trim().toLowerCase();
+        items = items.filter(sale => (nameFor(sale.contactId, contactMap, personName) ?? sale.customerName ?? "").toLowerCase().includes(s));
+      }
+      items = items.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      const total = items.length;
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      const start = (page - 1) * limit;
+      const pageItems = items.slice(start, start + limit);
+      return {
+        items: pageItems.map(sale => ({
+          ...sale,
+          customerName: nameFor(sale.contactId, contactMap, personName) ?? sale.customerName,
+          itemCount: itemCountBySale.get(sale.id) ?? 0,
+        })),
+        total, page, limit, totalPages,
+      };
+    }),
+    get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can view retail sales");
+      }
+      const sale = await fsGetById<RetailSale>("retail_sales", input.id);
+      if (!sale) return null;
+      const [contact, lineItems] = await Promise.all([
+        fsGetById<Contact>("contacts", sale.contactId),
+        fsListAll<RetailSaleItem>("retail_sale_items", { where: [["retailSaleId", "==", input.id]] }),
+      ]);
+      return {
+        ...sale,
+        customerName: (contact ? personName(contact) : null) ?? sale.customerName,
+        items: lineItems,
+      };
+    }),
+    create: protectedProcedure.input(z.object({
+      contactId: z.number(),
+      saleDate: z.string().optional(),
+      notes: z.string().optional(),
+      items: z.array(z.object({
+        itemId: z.number(),
+        quantity: z.number().int().positive(),
+      })).min(1, "At least one item is required"),
+    })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can record retail sales");
+      }
+
+      const contact = await fsGetById<Contact>("contacts", input.contactId);
+      if (!contact) throw new Error("Selected customer does not exist");
+      const customerName = personName(contact);
+
+      // Look up the "Retail Sale" withdrawal_purpose option if an admin has configured
+      // one (Settings -> Withdrawal Purposes); tag stock_out rows with it if present,
+      // otherwise fall back to a plain string label so the movement is still readable.
+      const retailPurposeOptions = await fsListAll<ConfigOption>("config_options", {
+        where: [["category", "==", "withdrawal_purpose"], ["value", "==", "Retail Sale"], ["isActive", "==", 1]],
+      });
+      const retailPurposeOption = retailPurposeOptions[0];
+
+      // Aggregate requested quantity per item (the same item may appear on more than
+      // one line) so stock validation checks the sale's true total draw per item.
+      const requestedByItem = new Map<number, number>();
+      for (const line of input.items) {
+        requestedByItem.set(line.itemId, (requestedByItem.get(line.itemId) ?? 0) + line.quantity);
+      }
+
+      // Pre-allocate every id up front — allocateIds opens its own transaction, so it
+      // cannot be called from inside the runTransaction below (see stockTransactions.create).
+      const saleId = await fsAllocateIds("retail_sales");
+      const firstLineItemId = await fsAllocateIds("retail_sale_items", input.items.length);
+      const firstStockTxnId = await fsAllocateIds("stock_transactions", input.items.length);
+      const firstAuditLogId = await fsAllocateIds("inventory_audit_log", input.items.length);
+
+      const now = new Date();
+      const saleDate = input.saleDate ? new Date(input.saleDate) : now;
+
+      await fdb().runTransaction(async (tx) => {
+        // Declared inside the callback: Firestore retries the whole body on write
+        // contention, and a subtotal accumulated outside would keep adding on top of
+        // the aborted attempt's total.
+        let subtotal = 0;
+
+        // ---- READS (Firestore transactions require every read before any write) ----
+        const itemIds = Array.from(requestedByItem.keys());
+        const itemSnaps = await tx.getAll(...itemIds.map(id => fdb().collection("inventory_items").doc(String(id))));
+        const itemById = new Map<number, InventoryItem>();
+        itemSnaps.forEach((snap, idx) => {
+          if (!snap.exists) throw new Error(`Inventory item #${itemIds[idx]} does not exist`);
+          itemById.set(itemIds[idx], fsDocToData<InventoryItem>(snap));
+        });
+
+        // ---- VALIDATE, inside the transaction and after the reads, so a concurrent
+        // sale against the same item(s) cannot drive stock negative. ----
+        for (const [itemId, qty] of Array.from(requestedByItem.entries())) {
+          const item = itemById.get(itemId)!;
+          if (qty > item.stockOnHand) {
+            throw new Error(`Insufficient stock for "${item.name}": requested ${qty}, only ${item.stockOnHand} on hand`);
+          }
+          // sellingPrice is a free-form string on the item and may be unset or garbage.
+          // Without this the line would silently record at 0.00 (or literal "NaN"),
+          // deducting stock for no revenue. The UI blocks this too, but the endpoint
+          // is callable directly.
+          const price = Number(item.sellingPrice);
+          if (!item.sellingPrice || !Number.isFinite(price) || price < 0) {
+            throw new Error(`"${item.name}" has no valid selling price set in Inventory — set one before selling it`);
+          }
+        }
+
+        // ---- WRITES: one retail_sale_items + stock_transactions + inventory_audit_log
+        // row per line, chaining previousStock/newStock per item across lines. ----
+        const runningStock = new Map<number, number>(itemIds.map(id => [id, itemById.get(id)!.stockOnHand]));
+        input.items.forEach((line, idx) => {
+          const item = itemById.get(line.itemId)!;
+          const unitPrice = item.sellingPrice || "0";
+          const lineTotal = money(line.quantity * Number(unitPrice));
+          subtotal += Number(lineTotal);
+
+          const lineItemId = firstLineItemId + idx;
+          tx.set(fdb().collection("retail_sale_items").doc(String(lineItemId)), {
+            id: lineItemId, retailSaleId: saleId, itemId: line.itemId,
+            itemName: item.name, itemSku: item.sku, description: item.description, unit: item.unit,
+            quantity: line.quantity, unitPrice, lineTotal,
+            createdAt: now,
+          });
+
+          const prevStock = runningStock.get(line.itemId)!;
+          const newStock = prevStock - line.quantity;
+          runningStock.set(line.itemId, newStock);
+
+          const stockTxnId = firstStockTxnId + idx;
+          tx.set(fdb().collection("stock_transactions").doc(String(stockTxnId)), {
+            id: stockTxnId, itemId: line.itemId, type: "stock_out", quantity: line.quantity,
+            reference: `Retail Sale #${saleId}`,
+            purpose: retailPurposeOption?.value ?? "Retail Sale",
+            purposeOptionId: retailPurposeOption?.id ?? null,
+            purposeRefId: saleId, purposeRefName: `Retail Sale #${saleId}`,
+            accountId: null, accountName: null,
+            contactId: input.contactId, contactName: customerName,
+            notes: input.notes ?? null,
+            createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
+            createdAt: now,
+          });
+
+          const auditId = firstAuditLogId + idx;
+          tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+            id: auditId, itemId: line.itemId, itemName: item.name, itemSku: item.sku,
+            transactionType: "stock_out", quantity: line.quantity,
+            previousStock: prevStock, newStock,
+            sourceLocation: item.warehouseLocation ?? null, destinationLocation: null,
+            reference: `Retail Sale #${saleId}`, purpose: retailPurposeOption?.value ?? "Retail Sale",
+            notes: input.notes ?? null,
+            performedBy: ctx.user.id, performedByName: ctx.user.name || "Unknown",
+            createdAt: now,
+          });
+
+          tx.set(fdb().collection("inventory_items").doc(String(line.itemId)), { stockOnHand: newStock, updatedAt: now }, { merge: true });
+        });
+
+        tx.set(fdb().collection("retail_sales").doc(String(saleId)), {
+          id: saleId,
+          contactId: input.contactId,
+          customerName,
+          saleDate,
+          subtotal: money(subtotal),
+          totalAmount: money(subtotal),
+          notes: input.notes ?? null,
+          createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
+          createdAt: now, updatedAt: now,
+        });
+      });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "retail_sale", saleId, `Recorded retail sale #${saleId} for ${customerName ?? `customer #${input.contactId}`} (${input.items.length} item line(s))`);
+      return { success: true, id: saleId };
+    }),
+    // Deliberately narrow: line items are immutable after creation (see report to the
+    // UI-building agent for the reasoning). Only the customer, date, and notes can be
+    // changed here — changing items requires delete + recreate.
+    update: protectedProcedure.input(z.object({
+      id: z.number(),
+      contactId: z.number().optional(),
+      saleDate: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can edit retail sales");
+      }
+      const { id, contactId, saleDate, notes } = input;
+      const updates: Record<string, unknown> = {};
+      if (contactId !== undefined) {
+        const contact = await fsGetById<Contact>("contacts", contactId);
+        if (!contact) throw new Error("Selected customer does not exist");
+        updates.contactId = contactId;
+        updates.customerName = personName(contact);
+      }
+      if (saleDate !== undefined) updates.saleDate = new Date(saleDate);
+      if (notes !== undefined) updates.notes = notes;
+      await fsUpdateOne("retail_sales", id, updates);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "retail_sale", id, `Updated retail sale #${id}`);
+      return { success: true };
+    }),
+    delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) {
+        throw new Error("Only Admin or Sub Admin can delete retail sales");
+      }
+      const sale = await fsGetById<RetailSale>("retail_sales", input.id);
+      if (!sale) throw new Error("Retail sale not found");
+      const lineItems = await fsListAll<RetailSaleItem>("retail_sale_items", { where: [["retailSaleId", "==", input.id]] });
+
+      // Pre-allocate reversal ids up front, same reasoning as create().
+      const firstReversalTxnId = await fsAllocateIds("stock_transactions", lineItems.length);
+      const firstReversalAuditId = await fsAllocateIds("inventory_audit_log", lineItems.length);
+      const now = new Date();
+
+      await fdb().runTransaction(async (tx) => {
+        // Re-read the sale inside the transaction. The existence check above runs
+        // outside it, so two concurrent deletes of the same sale would both get past
+        // it; the loser's retry would then restore the same stock a second time while
+        // its tx.delete() calls no-op silently.
+        const saleRef = fdb().collection("retail_sales").doc(String(input.id));
+        const saleSnap = await tx.get(saleRef);
+        if (!saleSnap.exists) throw new Error("Retail sale not found");
+
+        const itemIds = Array.from(new Set(lineItems.map(li => li.itemId)));
+        // Guard tx.getAll(), which throws if called with zero refs — a sale could in
+        // principle have no line items (e.g. a pre-existing corrupt record).
+        const itemSnaps = itemIds.length > 0
+          ? await tx.getAll(...itemIds.map(id => fdb().collection("inventory_items").doc(String(id))))
+          : [];
+        // A referenced item may have since been deleted from Inventory; restore stock
+        // for items that still exist, but still write the compensating history rows
+        // for every line so the reversal is fully audited either way.
+        const itemById = new Map<number, InventoryItem | undefined>();
+        itemSnaps.forEach((snap, idx) => {
+          itemById.set(itemIds[idx], snap.exists ? fsDocToData<InventoryItem>(snap) : undefined);
+        });
+        const runningStock = new Map<number, number>(itemIds.map(id => [id, itemById.get(id)?.stockOnHand ?? 0]));
+
+        lineItems.forEach((li, idx) => {
+          const item = itemById.get(li.itemId);
+          const prevStock = runningStock.get(li.itemId)!;
+          const newStock = prevStock + li.quantity;
+          runningStock.set(li.itemId, newStock);
+
+          const txnId = firstReversalTxnId + idx;
+          tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+            id: txnId, itemId: li.itemId, type: "stock_in", quantity: li.quantity,
+            reference: `Reversal of Retail Sale #${input.id}`, purpose: "Retail Sale Reversal",
+            purposeOptionId: null, purposeRefId: input.id, purposeRefName: `Retail Sale #${input.id}`,
+            accountId: null, accountName: null,
+            contactId: sale.contactId, contactName: sale.customerName,
+            notes: `Retail sale #${input.id} deleted`,
+            createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
+            createdAt: now,
+          });
+
+          const auditId = firstReversalAuditId + idx;
+          tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+            id: auditId, itemId: li.itemId, itemName: item?.name ?? li.itemName, itemSku: item?.sku ?? li.itemSku,
+            transactionType: "stock_in", quantity: li.quantity,
+            previousStock: prevStock, newStock,
+            sourceLocation: null, destinationLocation: item?.warehouseLocation ?? null,
+            reference: `Reversal of Retail Sale #${input.id}`, purpose: "Retail Sale Reversal",
+            notes: `Retail sale #${input.id} deleted`,
+            performedBy: ctx.user.id, performedByName: ctx.user.name || "Unknown",
+            createdAt: now,
+          });
+
+          if (item) {
+            tx.set(fdb().collection("inventory_items").doc(String(li.itemId)), { stockOnHand: newStock, updatedAt: now }, { merge: true });
+          }
+        });
+
+        lineItems.forEach(li => tx.delete(fdb().collection("retail_sale_items").doc(String(li.id))));
+        tx.delete(saleRef);
+      });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "retail_sale", input.id, `Deleted retail sale #${input.id} for ${sale.customerName ?? `customer #${sale.contactId}`}, restored stock for ${lineItems.length} line item(s)`);
+      return { success: true };
+    }),
+  }),
+
   // ============ PURCHASE ORDERS ============
   purchaseOrders: router({
     list: protectedProcedure.input(z.object({
@@ -1230,11 +1621,17 @@ export const appRouter = router({
       limit: z.number().default(20),
     }).optional()).query(async ({ input }) => {
       const p = input || { page: 1, limit: 20 };
-      const [allQuotes, accountsAll] = await Promise.all([
+      const [allQuotes, accounts, contacts, opportunities, users] = await Promise.all([
         fsListAll<Quotation>("quotations"),
-        p.search ? fsListAll<Account>("accounts") : Promise.resolve([] as Account[]),
+        fsListAll<Account>("accounts"),
+        fsListAll<Contact>("contacts"),
+        fsListAll<Opportunity>("opportunities"),
+        listUsersRaw(),
       ]);
-      const accountMap = new Map(accountsAll.map(a => [a.id, a]));
+      const accountMap = new Map(accounts.map(a => [a.id, a]));
+      const contactMap = new Map(contacts.map(c => [c.id, c]));
+      const opportunityMap = new Map(opportunities.map(o => [o.id, o]));
+      const userMap = new Map(users.map(u => [u.id, u]));
       let items = allQuotes;
       if (p.address) items = items.filter(q => (q.customerAddress || "").toLowerCase().includes(p.address!.toLowerCase()));
       if (p.kwRating) items = items.filter(q => (q.title || "").toLowerCase().includes(p.kwRating!.toLowerCase()));
@@ -1267,10 +1664,38 @@ export const appRouter = router({
       items = items.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       const total = items.length;
       const pageItems = items.slice((p.page - 1) * p.limit, (p.page - 1) * p.limit + p.limit);
-      return { items: pageItems, total };
+      // Denormalize FK names for the page's rows in 4 batched reads (one per referenced
+      // collection) rather than one Firestore read per quotation — see personName/nameFor above.
+      return {
+        items: pageItems.map(q => ({
+          ...q,
+          accountName: nameFor(q.accountId, accountMap, a => a.name),
+          contactName: nameFor(q.contactId, contactMap, personName),
+          opportunityName: nameFor(q.opportunityId, opportunityMap, o => o.title),
+          approvedByName: nameFor(q.approvedBy, userMap, u => u.name),
+          lastEditedByName: nameFor(q.lastEditedBy, userMap, u => u.name),
+        })),
+        total,
+      };
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      return (await fsGetById<Quotation>("quotations", input.id)) || null;
+      const quote = await fsGetById<Quotation>("quotations", input.id);
+      if (!quote) return null;
+      const [account, contact, opportunity, approvedByUser, lastEditedByUser] = await Promise.all([
+        quote.accountId != null ? fsGetById<Account>("accounts", quote.accountId) : Promise.resolve(null),
+        quote.contactId != null ? fsGetById<Contact>("contacts", quote.contactId) : Promise.resolve(null),
+        quote.opportunityId != null ? fsGetById<Opportunity>("opportunities", quote.opportunityId) : Promise.resolve(null),
+        quote.approvedBy != null ? getUserById(quote.approvedBy) : Promise.resolve(null),
+        quote.lastEditedBy != null ? getUserById(quote.lastEditedBy) : Promise.resolve(null),
+      ]);
+      return {
+        ...quote,
+        accountName: account?.name ?? null,
+        contactName: contact ? personName(contact) : null,
+        opportunityName: opportunity?.title ?? null,
+        approvedByName: approvedByUser?.name ?? null,
+        lastEditedByName: lastEditedByUser?.name ?? null,
+      };
     }),
     getItems: protectedProcedure.input(z.object({ quotationId: z.number() })).query(async ({ input }) => {
       return fsListAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", input.quotationId]] });
@@ -2699,7 +3124,7 @@ export const appRouter = router({
       const now = new Date();
       await ref.set({
         status: 'rejected', decidedBy: ctx.user.id, decidedByName: ctx.user.name || 'Admin',
-        decidedAt: now, notes: input.notes ?? data.notes, updatedAt: now,
+        decidedAt: now, rejectionReason: input.notes ?? null, updatedAt: now,
       }, { merge: true });
 
       await fsAudit(ctx.user.id, ctx.user.name, "reject", "cash_request", input.id, `Rejected cash request ${input.id}`);
