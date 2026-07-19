@@ -4,7 +4,7 @@ import { CATALOG_BY_NAME, COLLECTION_NAMES } from "../catalog";
 import { queryCollection, getDocument } from "../db";
 import { redactAll, toNum, toolResult, toolError } from "../format";
 import { generateExcel } from "../../exportRouter";
-import { storagePut } from "../../storage";
+import { storagePut, storageGetSignedUrl } from "../../storage";
 
 const EXPORT_MAX_LIMIT = 5000;
 
@@ -76,14 +76,20 @@ export function registerExportTools(server: McpServer, origin: string): void {
           rows
         );
         const filename = `${collection}-${Date.now()}.xlsx`;
-        const { url } = await storagePut(
+        const { key } = await storagePut(
           `mcp-exports/${filename}`,
           buffer as unknown as Uint8Array,
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         );
+        // Signed directly rather than via the /storage proxy: the proxy's
+        // mint step requires a CRM session/bearer, which a plain browser tab
+        // opening this link won't have. The caller is already authenticated
+        // (this tool ran under an authenticated MCP request), so hand back
+        // Firebase's own signed URL — no further auth needed to open it.
+        const url = await storageGetSignedUrl(key);
 
         return toolResult({
-          url: `${origin}${url}`,
+          url,
           filename,
           count: result.count,
           truncated: result.truncated,
