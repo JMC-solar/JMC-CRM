@@ -39,6 +39,12 @@ const statusColors: Record<string, string> = {
   received: "bg-green-500/20 text-green-400 border-green-500/30",
   cancelled: "bg-red-500/20 text-red-400 border-red-500/30",
 };
+const statusLabels: Record<string, string> = {
+  draft: "Draft",
+  sent: "PO sent to supplier",
+  received: "PO received by supplier",
+  cancelled: "PO cancelled by JMC",
+};
 
 export default function PurchaseOrderDetail() {
   const [, navigate] = useLocation();
@@ -142,9 +148,9 @@ export default function PurchaseOrderDetail() {
                   <Label>Order Status</Label>
                   <select name="status" defaultValue={po.status} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
                     <option value="draft">Draft</option>
-                    <option value="sent">Sent</option>
-                    <option value="received">Received</option>
-                    <option value="cancelled">Cancelled</option>
+                    <option value="sent">PO sent to supplier</option>
+                    <option value="received">PO received by supplier</option>
+                    <option value="cancelled">PO cancelled by JMC</option>
                   </select>
                 </div>
                 <div>
@@ -209,7 +215,7 @@ export default function PurchaseOrderDetail() {
         <Card className="bg-card border-border">
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground mb-1">Order Status</p>
-            <Badge variant="outline" className={statusColors[po.status]}>{po.status}</Badge>
+            <Badge variant="outline" className={statusColors[po.status]}>{statusLabels[po.status] ?? po.status}</Badge>
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
