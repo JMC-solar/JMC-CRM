@@ -9,6 +9,12 @@
     { "source": "/api/:path*", "destination": "/api/index" },
     { "source": "/storage/:path*", "destination": "/api/index" },
     { "source": "/manus-storage/:path*", "destination": "/api/index" },
+    { "source": "/.well-known/:path*", "destination": "/api/index" },
+    { "source": "/authorize", "destination": "/api/index" },
+    { "source": "/token", "destination": "/api/index" },
+    { "source": "/register", "destination": "/api/index" },
+    { "source": "/revoke", "destination": "/api/index" },
+    { "source": "/oauth/:path*", "destination": "/api/index" },
     { "source": "/:path*", "destination": "/index.html" }
   ]
 }
