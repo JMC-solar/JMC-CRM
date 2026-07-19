@@ -39,6 +39,12 @@ const statusColors: Record<string, string> = {
   received: "bg-green-500/20 text-green-400 border-green-500/30",
   cancelled: "bg-red-500/20 text-red-400 border-red-500/30",
 };
+const statusLabels: Record<string, string> = {
+  draft: "Draft",
+  sent: "PO sent to supplier",
+  received: "PO received by supplier",
+  cancelled: "PO cancelled by JMC",
+};
 
 export default function PurchaseOrders() {
   const [, navigate] = useLocation();
@@ -130,7 +136,7 @@ export default function PurchaseOrders() {
                     <tr key={po.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors cursor-pointer" onClick={() => navigate(`/purchase-orders/${po.id}`)}>
                       <td className="p-4 font-mono text-sm text-foreground">{po.poNumber}</td>
                       <td className="p-4 font-medium text-foreground">{po.supplier}</td>
-                      <td className="p-4"><Badge variant="outline" className={statusColors[po.status]}>{po.status}</Badge></td>
+                      <td className="p-4"><Badge variant="outline" className={statusColors[po.status]}>{statusLabels[po.status] ?? po.status}</Badge></td>
                       <td className="p-4"><Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge></td>
                       <td className="p-4"><Badge variant="outline" className={paymentStatusColors[po.paymentStatus]}>{paymentStatusLabels[po.paymentStatus]}</Badge></td>
                       <td className="p-4 text-foreground">{po.totalAmount ? `₱${Number(po.totalAmount).toLocaleString()}` : "-"}</td>

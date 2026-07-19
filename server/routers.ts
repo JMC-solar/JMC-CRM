@@ -1286,12 +1286,14 @@ export const appRouter = router({
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
       const po = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       if (!po) throw new Error("Purchase order not found");
-      const [items, payments] = await Promise.all([
+      const [items, payments, statusHistory] = await Promise.all([
         fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.id]] }),
+        fsListAll<{ id: number; purchaseOrderId: number; type: string; status: string; eventDate: Date; changedBy: number; changedByName: string; createdAt: Date }>("po_status_history", { where: [["purchaseOrderId", "==", input.id]] }),
       ]);
       payments.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-      return { ...po, items, payments };
+      statusHistory.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
+      return { ...po, items, payments, statusHistory };
     }),
 
     create: protectedProcedure.input(z.object({
@@ -1383,13 +1385,46 @@ export const appRouter = router({
       discountType: z.enum(["none", "percentage", "fixed"]).optional(),
       discountValue: z.string().optional(),
       recalculate: z.boolean().optional(),
+      // User-picked dates for the order-status / delivery-status change (ISO yyyy-mm-dd)
+      statusDate: z.string().optional(),
+      deliveryDate: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
+      const current = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       const updates: Record<string, unknown> = {};
-      if (input.status) updates.status = input.status;
-      if (input.deliveryStatus) updates.deliveryStatus = input.deliveryStatus;
+      const historyInserts: Promise<unknown>[] = [];
+
+      if (input.status) {
+        updates.status = input.status;
+        if (current && input.status !== current.status) {
+          const when = input.statusDate ? new Date(input.statusDate) : new Date();
+          if (input.status === "received") updates.receivedAt = when;
+          historyInserts.push(fsInsertOne("po_status_history", {
+            purchaseOrderId: input.id,
+            type: "order",
+            status: input.status,
+            eventDate: when,
+            changedBy: ctx.user.id,
+            changedByName: ctx.user.name || "Unknown",
+          }));
+        }
+      }
+      if (input.deliveryStatus) {
+        updates.deliveryStatus = input.deliveryStatus;
+        const when = input.deliveryDate ? new Date(input.deliveryDate) : new Date();
+        if (input.deliveryStatus === "fully_delivered") updates.deliveredAt = when;
+        if (current && input.deliveryStatus !== current.deliveryStatus) {
+          historyInserts.push(fsInsertOne("po_status_history", {
+            purchaseOrderId: input.id,
+            type: "delivery",
+            status: input.deliveryStatus,
+            eventDate: when,
+            changedBy: ctx.user.id,
+            changedByName: ctx.user.name || "Unknown",
+          }));
+        }
+      }
       if (input.paymentStatus) updates.paymentStatus = input.paymentStatus;
       if (input.notes !== undefined) updates.notes = input.notes;
-      if (input.deliveryStatus === "fully_delivered") updates.deliveredAt = new Date();
       if (input.vatEnabled !== undefined) updates.vatEnabled = input.vatEnabled ? 1 : 0;
       if (input.vatRate !== undefined) updates.vatRate = input.vatRate;
       if (input.discountType !== undefined) updates.discountType = input.discountType;
@@ -1412,6 +1447,7 @@ export const appRouter = router({
         updates.totalAmount = money(afterDiscount + vatAmount);
       }
       await fsUpdateOne("purchase_orders", input.id, updates);
+      if (historyInserts.length) await Promise.all(historyInserts);
       await fsAudit(ctx.user.id, ctx.user.name, "update", "purchase_order", input.id, `Updated PO #${input.id}: ${JSON.stringify(updates)}`);
       return { success: true };
     }),
