@@ -3193,6 +3193,23 @@ export const appRouter = router({
       return { success: true };
     }),
 
+    // A still-pending request can be erased outright by any sub-admin (or admin).
+    // Once a decision has been made it stays on the books — deleting an approved
+    // or received record would put a hole in the money trail.
+    remove: protectedProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (data.status !== 'pending') {
+        throw new Error("Only pending cash requests can be deleted");
+      }
+
+      await ref.delete();
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "cash_request", input.id, `Deleted pending cash request ${input.id} (total ₱${data.amount}, requested by ${data.requestedByName})`);
+      return { success: true };
+    }),
+
     approve: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
       const now = new Date();
       const reqData = await fdb().runTransaction(async tx => {

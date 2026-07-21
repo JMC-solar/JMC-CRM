@@ -3,6 +3,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -129,6 +139,7 @@ export default function CashRequests() {
   const [editing, setEditing] = useState<any>(null);
   const [editItems, setEditItems] = useState<ItemRow[]>([emptyRow()]);
   const [editNotes, setEditNotes] = useState("");
+  const [deletingRequest, setDeletingRequest] = useState<any>(null);
 
   const { data: requests, isLoading } = trpc.cashRequests.list.useQuery();
   const sortedRequests = useMemo(() => (requests ? sortRequests(requests, sortMode) : requests), [requests, sortMode]);
@@ -166,6 +177,10 @@ export default function CashRequests() {
     onSuccess: () => { toast.success("Marked as received"); utils.cashRequests.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+  const deleteMutation = trpc.cashRequests.remove.useMutation({
+    onSuccess: () => { toast.success("Cash request deleted"); setDeletingRequest(null); utils.cashRequests.list.invalidate(); },
+    onError: (err: any) => toast.error(err.message),
+  });
 
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -181,6 +196,8 @@ export default function CashRequests() {
 
   // Editable while pending (any sub-admin); after a decision only an admin can correct it.
   const canEdit = (req: any) => isAdmin || (isSubAdmin && req.status === "pending");
+  // Erasing is pending-only for everyone — an approved/received record stays on the books.
+  const canDelete = (req: any) => req.status === "pending" && (isSubAdmin || isAdmin);
 
   const openEdit = (req: any) => {
     setEditing(req);
@@ -321,7 +338,8 @@ export default function CashRequests() {
                     // Any sub-admin (or admin) can confirm receipt — not just the requester.
                     const canMarkReceived = req.status === "approved" && !req.received && (isSubAdmin || isAdmin);
                     const editable = canEdit(req);
-                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable;
+                    const deletable = canDelete(req);
+                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable;
                     const entries = itemsOf(req);
                     return (
                       <tr
@@ -360,6 +378,11 @@ export default function CashRequests() {
                                 <Pencil className="h-4 w-4" />
                               </Button>
                             )}
+                            {deletable && (
+                              <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => setDeletingRequest(req)} title="Delete request">
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
                             {canMarkReceived && (
                               <Button size="sm" variant="ghost" className="text-primary" onClick={() => receivedMutation.mutate({ id: req.id })} disabled={receivedMutation.isPending}>
                                 Mark Received
@@ -379,6 +402,30 @@ export default function CashRequests() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Erase confirmation — pending requests only, and deliberately irreversible. */}
+      <AlertDialog open={!!deletingRequest} onOpenChange={(open) => { if (!open) setDeletingRequest(null); }}>
+        <AlertDialogContent className="bg-card border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-foreground">Delete {deletingRequest?.id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently erases the pending request
+              {deletingRequest ? ` for ${formatPHP(deletingRequest.amount)} (${deletingRequest.requestedByName})` : ""}.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-border">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-500 text-white hover:bg-red-600"
+              onClick={() => deletingRequest && deleteMutation.mutate({ id: deletingRequest.id })}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Edit dialog — entries can be changed while pending; admins can correct later. */}
       <Dialog open={!!editing} onOpenChange={(open) => { if (!open) setEditing(null); }}>
