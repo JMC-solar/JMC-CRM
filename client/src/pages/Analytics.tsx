@@ -103,7 +103,10 @@ export default function Analytics() {
         )}
         <StatCard icon={Trophy} accent="green" label="Won Deals" value={stats?.wonDeals ?? 0} />
         <StatCard icon={Percent} accent="teal" label="Conversion Rate" value={`${stats?.conversionRate ?? 0}%`} />
-        <StatCard icon={Coins} accent="amber" label="Inventory Value" value={formatPHP(stats?.inventoryValue)} />
+        {/* Peso value is admin-only. */}
+        {isAdmin && (
+          <StatCard icon={Coins} accent="amber" label="Inventory Value" value={formatPHP(stats?.inventoryValue)} />
+        )}
       </div>
 
       {/* ---------------- SALES ---------------- */}

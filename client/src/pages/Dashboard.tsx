@@ -19,6 +19,7 @@ import {
   Wallet,
   Users,
   Coins,
+  Package,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
@@ -107,13 +108,24 @@ export default function Dashboard() {
           value={dash ?? (stats?.totalLeads ?? 0)}
           hint="Across the funnel"
         />
-        <StatCard
-          icon={Coins}
-          accent="amber"
-          label="Inventory Value"
-          value={dash ?? formatPHP(stats?.inventoryValue)}
-          hint={`${stats?.totalInventoryItems ?? 0} items in stock`}
-        />
+        {/* Peso value is admin-only; sub-admins see the item count instead. */}
+        {isAdmin ? (
+          <StatCard
+            icon={Coins}
+            accent="amber"
+            label="Inventory Value"
+            value={dash ?? formatPHP(stats?.inventoryValue)}
+            hint={`${stats?.totalInventoryItems ?? 0} items in stock`}
+          />
+        ) : (
+          <StatCard
+            icon={Package}
+            accent="amber"
+            label="Inventory Items"
+            value={dash ?? (stats?.totalInventoryItems ?? 0)}
+            hint="Items in stock"
+          />
+        )}
         <StatCard
           icon={AlertTriangle}
           accent="red"
