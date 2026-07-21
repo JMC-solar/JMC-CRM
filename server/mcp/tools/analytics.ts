@@ -157,7 +157,7 @@ export function registerAnalyticsTools(server: McpServer, caller: Caller): void 
     "cash_requests_analytics",
     {
       title: "Cash requests analytics",
-      description: "Approved cash request amounts by month and purpose. Self-scoped to the caller's own requests unless the caller is admin.",
+      description: "Approved cash request amounts by month and purpose, across all requests. A request may hold several entries; each entry counts under its own purpose.",
       annotations: { readOnlyHint: true },
     },
     async () => callProcedure(() => caller.cashRequests.analytics())

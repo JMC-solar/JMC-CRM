@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Plus, Check, X, Clock, CheckCircle, XCircle } from "lucide-react";
+import { Plus, Check, X, Clock, CheckCircle, XCircle, Pencil, Trash2 } from "lucide-react";
 import DetailDialog from "@/components/DetailDialog";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -17,6 +17,82 @@ import { toast } from "sonner";
 const MONTH_NAMES = Array.from({ length: 12 }, (_, i) => new Date(2000, i, 1).toLocaleString("default", { month: "long" }));
 
 type SortMode = "month_asc" | "month_desc" | "date_desc" | "date_asc";
+
+/** One editable row in the entries editor. Kept as strings while typing. */
+type ItemRow = { purposeOptionId: string; amount: string };
+const emptyRow = (): ItemRow => ({ purposeOptionId: "", amount: "" });
+
+/** Drop incomplete rows and convert to the shape the server expects. */
+function buildItems(rows: ItemRow[]) {
+  return rows
+    .filter(r => r.purposeOptionId && parseFloat(r.amount) > 0)
+    .map(r => ({ purposeOptionId: parseInt(r.purposeOptionId), amount: parseFloat(r.amount) }));
+}
+
+const rowsTotal = (rows: ItemRow[]) => rows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+
+/** Repeating purpose + amount rows with a running total. */
+function ItemsEditor({
+  rows,
+  setRows,
+  purposeOptions,
+}: {
+  rows: ItemRow[];
+  setRows: (rows: ItemRow[]) => void;
+  purposeOptions: any[] | undefined;
+}) {
+  const update = (i: number, patch: Partial<ItemRow>) =>
+    setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  return (
+    <div className="space-y-2">
+      <Label>Entries *</Label>
+      {rows.map((row, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <select
+            value={row.purposeOptionId}
+            onChange={(e) => update(i, { purposeOptionId: e.target.value })}
+            className="min-w-0 flex-1 rounded-md border border-border bg-input px-2 py-2 text-sm text-foreground"
+          >
+            <option value="">-- Purpose --</option>
+            {purposeOptions?.map((o: any) => (
+              <option key={o.id} value={o.id}>{o.value}</option>
+            ))}
+          </select>
+          <Input
+            type="number"
+            min="0.01"
+            step="0.01"
+            value={row.amount}
+            onChange={(e) => update(i, { amount: e.target.value })}
+            className="w-28 shrink-0 border-border bg-input"
+            placeholder="0.00"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="shrink-0 text-muted-foreground hover:text-red-400"
+            onClick={() => setRows(rows.filter((_, j) => j !== i))}
+            disabled={rows.length === 1}
+            title="Remove entry"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+
+      <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setRows([...rows, emptyRow()])}>
+        <Plus className="mr-1 h-4 w-4" /> Add entry
+      </Button>
+
+      <div className="flex items-center justify-between border-t border-border pt-2">
+        <span className="text-sm text-muted-foreground">Total</span>
+        <span className="text-lg font-bold tabular-nums text-foreground">{formatPHP(rowsTotal(rows))}</span>
+      </div>
+    </div>
+  );
+}
 
 // Sorts by the request's *attributed* month/year (not raw createdAt) — an old/backfilled
 // record tagged March belongs with March, regardless of when it was actually entered.
@@ -33,6 +109,11 @@ function sortRequests(requests: any[], mode: SortMode): any[] {
   }
 }
 
+const itemsOf = (req: any): any[] =>
+  (req?.items && req.items.length > 0)
+    ? req.items
+    : (req ? [{ purposeOptionId: req.purposeOptionId, purposeLabel: req.purposeLabel, amount: req.amount }] : []);
+
 export default function CashRequests() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -44,11 +125,15 @@ export default function CashRequests() {
   const [oldMonth, setOldMonth] = useState(new Date().getMonth() + 1);
   const [sortMode, setSortMode] = useState<SortMode>("month_asc");
   const [viewingRequest, setViewingRequest] = useState<any>(null);
+  const [createItems, setCreateItems] = useState<ItemRow[]>([emptyRow()]);
+  const [editing, setEditing] = useState<any>(null);
+  const [editItems, setEditItems] = useState<ItemRow[]>([emptyRow()]);
+  const [editNotes, setEditNotes] = useState("");
 
   const { data: requests, isLoading } = trpc.cashRequests.list.useQuery();
   const sortedRequests = useMemo(() => (requests ? sortRequests(requests, sortMode) : requests), [requests, sortMode]);
 
-  // Approved-this-year KPIs — scoped the same as the list itself (admin sees all, sub-admin their own).
+  // Approved-this-year KPIs — every admin and sub-admin now sees the whole cash book.
   const currentYear = new Date().getFullYear();
   const approvedThisYear = useMemo(
     () => (requests ?? []).filter((r: any) => r.status === "approved" && r.year === currentYear),
@@ -63,6 +148,10 @@ export default function CashRequests() {
   // burned without a real request behind it. See handleCreate for the payload.
   const createMutation = trpc.cashRequests.create.useMutation({
     onSuccess: (data) => { toast.success(`Cash request ${data.id} submitted`); setIsCreateOpen(false); utils.cashRequests.list.invalidate(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const updateMutation = trpc.cashRequests.update.useMutation({
+    onSuccess: () => { toast.success("Cash request updated"); setEditing(null); utils.cashRequests.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
   const approveMutation = trpc.cashRequests.approve.useMutation({
@@ -81,12 +170,29 @@ export default function CashRequests() {
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
+    const items = buildItems(createItems);
+    if (items.length === 0) { toast.error("Add at least one entry with a purpose and an amount"); return; }
     createMutation.mutate({
       isOldRecord, month: isOldRecord ? oldMonth : undefined,
-      purposeOptionId: parseInt(fd.get("purposeOptionId") as string),
-      amount: parseFloat(fd.get("amount") as string),
+      items,
       notes: (fd.get("notes") as string) || undefined,
     });
+  };
+
+  // Editable while pending (any sub-admin); after a decision only an admin can correct it.
+  const canEdit = (req: any) => isAdmin || (isSubAdmin && req.status === "pending");
+
+  const openEdit = (req: any) => {
+    setEditing(req);
+    setEditItems(itemsOf(req).map((it: any) => ({ purposeOptionId: String(it.purposeOptionId ?? ""), amount: String(it.amount ?? "") })));
+    setEditNotes(req.notes ?? "");
+  };
+
+  const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const items = buildItems(editItems);
+    if (items.length === 0) { toast.error("Add at least one entry with a purpose and an amount"); return; }
+    updateMutation.mutate({ id: editing.id, items, notes: editNotes || undefined });
   };
 
   const statusBadge = (status: string, received: boolean) => {
@@ -115,7 +221,7 @@ export default function CashRequests() {
             open={isCreateOpen}
             onOpenChange={(open) => {
               setIsCreateOpen(open);
-              if (!open) { setIsOldRecord(false); setOldMonth(new Date().getMonth() + 1); }
+              if (!open) { setIsOldRecord(false); setOldMonth(new Date().getMonth() + 1); setCreateItems([emptyRow()]); }
             }}
           >
             <DialogTrigger asChild>
@@ -145,20 +251,7 @@ export default function CashRequests() {
                   </div>
                 )}
 
-                <div>
-                  <Label>Purpose *</Label>
-                  <select name="purposeOptionId" required className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="">-- Select Purpose --</option>
-                    {purposeOptions?.map((o: any) => (
-                      <option key={o.id} value={o.id}>{o.value}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <Label>Amount (₱) *</Label>
-                  <Input name="amount" type="number" min="0.01" step="0.01" required className="bg-input border-border" placeholder="0.00" />
-                </div>
+                <ItemsEditor rows={createItems} setRows={setCreateItems} purposeOptions={purposeOptions} />
 
                 <div>
                   <Label>Notes</Label>
@@ -209,22 +302,27 @@ export default function CashRequests() {
                 <tr className="border-b border-border">
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">ID</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Requested By</th>
-                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Purpose</th>
-                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Amount</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Entries</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Total</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Record</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Status</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Received By</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Date</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {isLoading ? (
-                  <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
+                  <tr><td colSpan={9} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : sortedRequests?.length === 0 ? (
-                  <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No cash requests found.</td></tr>
+                  <tr><td colSpan={9} className="p-8 text-center text-muted-foreground">No cash requests found.</td></tr>
                 ) : (
                   sortedRequests?.map((req: any) => {
-                    const canMarkReceived = req.status === "approved" && !req.received && req.requestedBy === user?.id;
+                    // Any sub-admin (or admin) can confirm receipt — not just the requester.
+                    const canMarkReceived = req.status === "approved" && !req.received && (isSubAdmin || isAdmin);
+                    const editable = canEdit(req);
+                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable;
+                    const entries = itemsOf(req);
                     return (
                       <tr
                         key={req.id}
@@ -233,30 +331,41 @@ export default function CashRequests() {
                       >
                         <td className="p-4 text-sm font-mono text-foreground">{req.id}</td>
                         <td className="p-4 text-sm text-muted-foreground">{req.requestedByName}</td>
-                        <td className="p-4 text-sm text-foreground">{req.purposeLabel}</td>
-                        <td className="p-4 text-sm text-foreground font-medium">₱{req.amount}</td>
+                        <td className="p-4 text-sm text-foreground">
+                          <div className="max-w-[220px] truncate">{entries.map((i: any) => i.purposeLabel).join(", ")}</div>
+                          {entries.length > 1 && (
+                            <span className="text-xs text-muted-foreground">{entries.length} entries</span>
+                          )}
+                        </td>
+                        <td className="p-4 text-sm font-medium tabular-nums text-foreground">{formatPHP(req.amount)}</td>
                         <td className="p-4 text-sm text-muted-foreground">{req.isOldRecord ? "Old" : "New"}</td>
                         <td className="p-4">{statusBadge(req.status, req.received)}</td>
+                        <td className="p-4 text-sm text-muted-foreground">{req.receivedByName || "-"}</td>
                         <td className="p-4 text-sm text-muted-foreground">{new Date(req.createdAt).toLocaleDateString()}</td>
                         <td className="p-4">
                           {/* Stop row-level view clicks from firing behind the action buttons */}
                           <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                             {req.status === "pending" && isAdmin && (
                               <>
-                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => approveMutation.mutate({ id: req.id })} disabled={approveMutation.isPending}>
+                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => approveMutation.mutate({ id: req.id })} disabled={approveMutation.isPending} title="Approve">
                                   <Check className="h-4 w-4" />
                                 </Button>
-                                <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: req.id })} disabled={rejectMutation.isPending}>
+                                <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: req.id })} disabled={rejectMutation.isPending} title="Reject">
                                   <X className="h-4 w-4" />
                                 </Button>
                               </>
+                            )}
+                            {editable && (
+                              <Button size="sm" variant="ghost" className="text-primary" onClick={() => openEdit(req)} title="Edit entries">
+                                <Pencil className="h-4 w-4" />
+                              </Button>
                             )}
                             {canMarkReceived && (
                               <Button size="sm" variant="ghost" className="text-primary" onClick={() => receivedMutation.mutate({ id: req.id })} disabled={receivedMutation.isPending}>
                                 Mark Received
                               </Button>
                             )}
-                            {!(req.status === "pending" && isAdmin) && !canMarkReceived && (
+                            {!hasActions && (
                               <span className="text-xs text-muted-foreground">{req.decidedByName || "-"}</span>
                             )}
                           </div>
@@ -271,29 +380,62 @@ export default function CashRequests() {
         </CardContent>
       </Card>
 
+      {/* Edit dialog — entries can be changed while pending; admins can correct later. */}
+      <Dialog open={!!editing} onOpenChange={(open) => { if (!open) setEditing(null); }}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">Edit {editing?.id}</DialogTitle></DialogHeader>
+          <form onSubmit={handleEditSubmit} className="space-y-4">
+            {editing && editing.status !== "pending" && (
+              <p className="rounded-md border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-400">
+                This request was already {editing.status}. You're editing it as an admin.
+              </p>
+            )}
+
+            <ItemsEditor rows={editItems} setRows={setEditItems} purposeOptions={purposeOptions} />
+
+            <div>
+              <Label>Notes</Label>
+              <Textarea value={editNotes} onChange={(e) => setEditNotes(e.target.value)} className="bg-input border-border" placeholder="Additional details..." />
+            </div>
+
+            <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
+              {updateMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       <DetailDialog
         open={!!viewingRequest}
         onOpenChange={(open) => !open && setViewingRequest(null)}
         title={viewingRequest?.id}
-        subtitle={viewingRequest?.purposeLabel}
+        subtitle={viewingRequest ? itemsOf(viewingRequest).map((i: any) => i.purposeLabel).join(", ") : undefined}
         headerRight={viewingRequest ? statusBadge(viewingRequest.status, viewingRequest.received) : undefined}
         sections={[
           {
             title: "Request",
             fields: [
               { label: "Requested By", value: viewingRequest?.requestedByName },
-              { label: "Purpose", value: viewingRequest?.purposeLabel },
-              { label: "Amount", value: viewingRequest ? formatPHP(viewingRequest.amount) : undefined },
+              {
+                label: "Entries",
+                value: viewingRequest
+                  ? itemsOf(viewingRequest).map((i: any) => `${i.purposeLabel} — ${formatPHP(i.amount)}`).join("  ·  ")
+                  : undefined,
+                full: true,
+              },
+              { label: "Total", value: viewingRequest ? formatPHP(viewingRequest.amount) : undefined },
               { label: "Record", value: viewingRequest ? (viewingRequest.isOldRecord ? "Old" : "New") : undefined },
               { label: "Month", value: viewingRequest ? `${MONTH_NAMES[viewingRequest.month - 1]} ${viewingRequest.year}` : undefined },
               { label: "Submitted", value: viewingRequest ? new Date(viewingRequest.createdAt).toLocaleDateString() : undefined },
             ],
           },
           {
-            title: "Approval",
+            title: "Trail",
             fields: [
+              { label: "Requested By", value: viewingRequest?.requestedByName },
               { label: "Decided By", value: viewingRequest?.decidedByName },
               { label: "Decided At", value: viewingRequest?.decidedAt ? new Date(viewingRequest.decidedAt).toLocaleDateString() : null },
+              { label: "Received By", value: viewingRequest?.receivedByName },
               { label: "Received At", value: viewingRequest?.receivedAt ? new Date(viewingRequest.receivedAt).toLocaleDateString() : null },
               { label: "Rejection Reason", value: viewingRequest?.rejectionReason, full: true, hidden: !viewingRequest?.rejectionReason },
             ],

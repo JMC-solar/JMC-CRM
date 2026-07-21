@@ -616,15 +616,26 @@ export function money(n: number): string {
 }
 
 // ============ CASH REQUESTS ============
+/** One line entry inside a cash request (e.g. Fuel — ₱2,000). */
+export interface CashRequestItem {
+  purposeOptionId: number;
+  purposeLabel: string; // denormalized at request time
+  amount: string;
+}
+
 export interface CashRequest {
   id: string; // "cr-0701053" — the Firestore doc id itself, not a numeric surrogate
   month: number; // 1-12, month this request is attributed to
   year: number;
   monthSeq: number; // per-month counter value
   yearSeq: number; // running yearly counter value
+  // A request can hold several entries. Records created before multi-entry
+  // support have no `items` — read them through the normaliser, which falls
+  // back to the single legacy purpose/amount below.
+  items?: CashRequestItem[];
   purposeOptionId: number; // config_options row id, category "cash_request_purpose"
   purposeLabel: string; // denormalized at request time
-  amount: string;
+  amount: string; // total across all items
   isOldRecord: boolean;
   status: "pending" | "approved" | "rejected";
   received: boolean;
@@ -634,6 +645,10 @@ export interface CashRequest {
   decidedByName: string | null;
   decidedAt: Date | null;
   receivedAt: Date | null;
+  // Who confirmed receipt of the cash. Need not be the requester — any sub-admin
+  // can receive it. Absent on records created before this was tracked.
+  receivedBy?: number | null;
+  receivedByName?: string | null;
   notes: string | null;
   // Admin's reason for rejecting, kept separate from the requester's own `notes`.
   // Absent (`undefined`) on requests rejected before this field existed.

@@ -54,6 +54,7 @@ import type {
   SpecialQuotationTemplate,
   SpecialQuotation,
   CashRequest,
+  CashRequestItem,
   Notification,
   RetailSale,
   RetailSaleItem,
@@ -107,6 +108,16 @@ async function recalcQuotationTotals(quotationId: number): Promise<void> {
     taxAmount: money(taxAmt),
     totalAmount: money(total),
   });
+}
+
+/**
+ * Cash requests can hold several entries. Records created before multi-entry
+ * support have no `items`, so read every request through this — it falls back
+ * to the single legacy purpose/amount so old records still display and total up.
+ */
+function crItems(r: CashRequest): CashRequestItem[] {
+  if (r.items && r.items.length > 0) return r.items;
+  return [{ purposeOptionId: r.purposeOptionId, purposeLabel: r.purposeLabel, amount: r.amount }];
 }
 
 export const appRouter = router({
@@ -3063,12 +3074,14 @@ export const appRouter = router({
 
   // ============ CASH REQUESTS (Sub-admin requests, admin approves) ============
   cashRequests: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const filters: [string, WhereFilterOp, any][] = [];
-      if (ctx.user.role !== 'admin') filters.push(["requestedBy", "==", ctx.user.id]);
-      const requests = await fsListAllRaw<CashRequest>("cash_requests", { where: filters });
+    // Every admin and sub-admin sees all cash requests — the team shares one
+    // cash book, and any sub-admin may receive cash they didn't request.
+    list: protectedProcedure.query(async () => {
+      const requests = await fsListAllRaw<CashRequest>("cash_requests", { where: [] });
       // Ascending by id groups naturally by month then monthSeq (cr-MMNNYYY, fixed-width).
-      return requests.sort((a, b) => a.id.localeCompare(b.id));
+      return requests
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map(r => ({ ...r, items: crItems(r) }));
     }),
 
     // The cr-MMNNYYY number is reserved and the doc written in one atomic transaction,
@@ -3077,11 +3090,20 @@ export const appRouter = router({
     // behind it.
     create: protectedProcedure.input(z.object({
       isOldRecord: z.boolean(), month: z.number().min(1).max(12).optional(),
-      purposeOptionId: z.number(), amount: z.number().positive(), notes: z.string().optional(),
+      // One request can cover several purposes, e.g. Fuel ₱2,000 + Salary ₱15,000.
+      items: z.array(z.object({ purposeOptionId: z.number(), amount: z.number().positive() })).min(1),
+      notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== 'subadmin') throw new Error("Only sub-admin can request cash");
 
-      const purposeOption = await fsGetById<ConfigOption>("config_options", input.purposeOptionId);
+      const options = await Promise.all(input.items.map(it => fsGetById<ConfigOption>("config_options", it.purposeOptionId)));
+      const items: CashRequestItem[] = input.items.map((it, i) => ({
+        purposeOptionId: it.purposeOptionId,
+        purposeLabel: options[i]?.value ?? "Unknown",
+        amount: money(it.amount),
+      }));
+      const total = input.items.reduce((sum, it) => sum + it.amount, 0);
+      const summary = items.map(i => i.purposeLabel).join(", ");
       const now = new Date();
       const year = now.getFullYear();
       const month = input.isOldRecord ? (input.month ?? now.getMonth() + 1) : now.getMonth() + 1;
@@ -3102,12 +3124,17 @@ export const appRouter = router({
         // approval or receipt confirmation makes sense for something already done.
         tx.set(fdb().collection("cash_requests").doc(id), {
           id, month, year, monthSeq, yearSeq,
-          purposeOptionId: input.purposeOptionId, purposeLabel: purposeOption?.value ?? "Unknown",
-          amount: money(input.amount), isOldRecord: input.isOldRecord,
+          items,
+          // Legacy single-purpose fields kept in sync with the first entry so
+          // older readers and notification text still work.
+          purposeOptionId: items[0].purposeOptionId, purposeLabel: items[0].purposeLabel,
+          amount: money(total), isOldRecord: input.isOldRecord,
           status: input.isOldRecord ? 'approved' : 'pending', received: input.isOldRecord,
           requestedBy: ctx.user.id, requestedByName: ctx.user.name || 'Unknown',
           decidedBy: null, decidedByName: input.isOldRecord ? 'Backfilled record' : null,
           decidedAt: input.isOldRecord ? now : null, receivedAt: input.isOldRecord ? now : null,
+          receivedBy: input.isOldRecord ? ctx.user.id : null,
+          receivedByName: input.isOldRecord ? (ctx.user.name || 'Unknown') : null,
           notes: input.notes ?? null,
           createdAt: now, updatedAt: now,
         });
@@ -3115,18 +3142,55 @@ export const appRouter = router({
       });
 
       const action = input.isOldRecord ? "Logged" : "Requested";
-      await fsAudit(ctx.user.id, ctx.user.name, "create", "cash_request", id, `${action} ${money(input.amount)} for ${purposeOption?.value ?? 'unknown purpose'} (${id})`);
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "cash_request", id, `${action} ${money(total)} across ${items.length} entr${items.length === 1 ? 'y' : 'ies'} (${summary}) (${id})`);
 
       const admins = (await listUsersRaw()).filter(u => u.role === 'admin');
       const message = input.isOldRecord
-        ? `${ctx.user.name || 'A sub-admin'} logged a completed cash request of ${money(input.amount)} for ${purposeOption?.value ?? 'a purpose'} (${id}) — already received.`
-        : `${ctx.user.name || 'A sub-admin'} requested ${money(input.amount)} for ${purposeOption?.value ?? 'a purpose'} (${id})`;
+        ? `${ctx.user.name || 'A sub-admin'} logged a completed cash request of ${money(total)} for ${summary} (${id}) — already received.`
+        : `${ctx.user.name || 'A sub-admin'} requested ${money(total)} for ${summary} (${id})`;
       await Promise.all(admins.map(a => fsInsertOne("notifications", {
         userId: a.id, type: "cash_request_created",
         message, link: "/cash-requests", entityId: id, read: false,
       })));
 
       return { success: true, id };
+    }),
+
+    // Any sub-admin may edit a request while it is still pending. Once an admin
+    // has decided on it, it locks — only an admin can correct it after that, so
+    // approved amounts can't be quietly changed behind the approval.
+    update: protectedProcedure.input(z.object({
+      id: z.string(),
+      items: z.array(z.object({ purposeOptionId: z.number(), amount: z.number().positive() })).min(1),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (ctx.user.role !== 'admin' && data.status !== 'pending') {
+        throw new Error("This request has already been decided — only an admin can edit it now");
+      }
+
+      const options = await Promise.all(input.items.map(it => fsGetById<ConfigOption>("config_options", it.purposeOptionId)));
+      const items: CashRequestItem[] = input.items.map((it, i) => ({
+        purposeOptionId: it.purposeOptionId,
+        purposeLabel: options[i]?.value ?? "Unknown",
+        amount: money(it.amount),
+      }));
+      const total = input.items.reduce((sum, it) => sum + it.amount, 0);
+      const now = new Date();
+
+      await ref.set({
+        items,
+        purposeOptionId: items[0].purposeOptionId, purposeLabel: items[0].purposeLabel,
+        amount: money(total),
+        notes: input.notes ?? data.notes ?? null,
+        updatedAt: now,
+      }, { merge: true });
+
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "cash_request", input.id, `Edited cash request ${input.id}: ${items.length} entr${items.length === 1 ? 'y' : 'ies'} (${items.map(i => i.purposeLabel).join(", ")}), total ${money(total)}`);
+      return { success: true };
     }),
 
     approve: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
@@ -3177,27 +3241,34 @@ export const appRouter = router({
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");
       const data = fsDocToDataRaw<CashRequest>(snap);
-      if (data.requestedBy !== ctx.user.id) throw new Error("Only the requester can mark this received");
+      // The receiver need not be the requester — any sub-admin (or admin) may
+      // collect the cash, and we record exactly who did.
       if (data.status !== 'approved' || data.received) throw new Error("Cash request is not awaiting receipt");
 
       const now = new Date();
-      await ref.set({ received: true, receivedAt: now, updatedAt: now }, { merge: true });
+      await ref.set({
+        received: true, receivedAt: now,
+        receivedBy: ctx.user.id, receivedByName: ctx.user.name || 'Unknown',
+        updatedAt: now,
+      }, { merge: true });
 
       await fsAudit(ctx.user.id, ctx.user.name, "receive", "cash_request", input.id, `Marked cash request ${input.id} as received`);
-      if (data.decidedBy) {
-        await fsInsertOne("notifications", {
-          userId: data.decidedBy, type: "cash_request_received",
-          message: `${ctx.user.name || 'Sub-admin'} marked cash request ${input.id} (${data.purposeLabel}) as received.`,
-          link: "/cash-requests", entityId: input.id, read: false,
-        });
-      }
+      const notifyIds = new Set<number>();
+      if (data.decidedBy) notifyIds.add(data.decidedBy);
+      // Tell the requester too when someone else collected on their behalf.
+      if (data.requestedBy !== ctx.user.id) notifyIds.add(data.requestedBy);
+      await Promise.all(Array.from(notifyIds).map(userId => fsInsertOne("notifications", {
+        userId, type: "cash_request_received",
+        message: `${ctx.user.name || 'Sub-admin'} received cash request ${input.id} (${data.purposeLabel}).`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      })));
       return { success: true };
     }),
 
     // Spend-by-purpose over time, for the Analytics page line chart.
-    analytics: protectedProcedure.query(async ({ ctx }) => {
+    analytics: protectedProcedure.query(async () => {
+      // Scoped the same as list(): everyone sees the whole cash book.
       const filters: [string, WhereFilterOp, any][] = [["status", "==", "approved"]];
-      if (ctx.user.role !== 'admin') filters.push(["requestedBy", "==", ctx.user.id]);
       const [requests, purposeOptions] = await Promise.all([
         fsListAllRaw<CashRequest>("cash_requests", { where: filters }),
         fsListAll<ConfigOption>("config_options", { where: [["category", "==", "cash_request_purpose"], ["isActive", "==", 1]] }),
@@ -3212,7 +3283,11 @@ export const appRouter = router({
       for (const r of requests) {
         const key = `${r.year}-${String(r.month).padStart(2, "0")}`;
         const row = byMonth.get(key) ?? {};
-        row[r.purposeLabel] = (row[r.purposeLabel] ?? 0) + Number(r.amount);
+        // Each entry counts under its own purpose, so a multi-entry request
+        // splits across the categories it actually covers.
+        for (const it of crItems(r)) {
+          row[it.purposeLabel] = (row[it.purposeLabel] ?? 0) + Number(it.amount);
+        }
         byMonth.set(key, row);
       }
 
