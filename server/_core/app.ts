@@ -12,6 +12,7 @@ import { localAuthRouter } from "../localAuth";
 import { exportRouter } from "../exportRouter";
 import { poPdfRouter } from "../poPdf";
 import { retailPdfRouter } from "../retailPdf";
+import { netMeteringBillingPdfRouter } from "../netMeteringBillingPdf";
 import { createContext } from "./context";
 import { ENV } from "./env";
 
@@ -54,6 +55,7 @@ export function createApp(): Express {
   app.use(exportRouter);
   app.use(poPdfRouter);
   app.use(retailPdfRouter);
+  app.use(netMeteringBillingPdfRouter);
 
   // tRPC API
   app.use(

@@ -466,6 +466,31 @@ export interface ProjectPayment {
 }
 
 // ============ NET METERING PAYMENTS ============
+/** One line on a net metering billing, e.g. "LGU permit fee" — ₱3,000. */
+export interface NetMeteringBillingItem {
+  description: string;
+  amount: string;
+}
+
+/**
+ * The amount JMC bills the client for processing a net metering application.
+ * One billing sheet per net metering record; entries are added to it and the
+ * total is what the client owes. Payments are tracked separately below.
+ */
+export interface NetMeteringBilling {
+  id: number;
+  netMeteringId: number;
+  projectId: number | null;
+  billingNumber: string; // "NMB-XXXXXX"
+  items: NetMeteringBillingItem[];
+  total: string;
+  notes: string | null;
+  createdBy: number | null;
+  createdByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface NetMeteringPayment {
   id: number;
   projectId: number;
