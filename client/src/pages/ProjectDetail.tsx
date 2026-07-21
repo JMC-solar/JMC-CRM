@@ -675,6 +675,7 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
       setIsAddOpen(false);
       setPaymentMethod("");
       utils.netMeteringPayments.list.invalidate({ projectId });
+      utils.netMeteringPayments.centralList.invalidate();
     },
     onError: (err: any) => toast.error(err.message),
   });
@@ -682,6 +683,7 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
     onSuccess: () => {
       toast.success("Payment deleted");
       utils.netMeteringPayments.list.invalidate({ projectId });
+      utils.netMeteringPayments.centralList.invalidate();
     },
     onError: (err: any) => toast.error(err.message),
   });
@@ -937,12 +939,22 @@ function NetMeteringSection({ projectId, project }: { projectId: number; project
   const { data: nmRecord } = trpc.netMetering.getByProjectId.useQuery({ projectId });
   const { data: setupTypes } = trpc.config.getOptions.useQuery({ category: "project_setup_type" });
 
+  // Refresh the standalone Net Metering tab and the payments roll-up too —
+  // otherwise a record created here sits behind a stale cache and looks like
+  // it never appeared on those screens.
+  const refreshNetMeteringViews = () => {
+    utils.netMetering.getByProjectId.invalidate({ projectId });
+    utils.netMetering.list.invalidate();
+    utils.netMetering.stats.invalidate();
+    utils.netMeteringPayments.centralList.invalidate();
+  };
+
   const createMutation = trpc.netMetering.create.useMutation({
-    onSuccess: () => { toast.success("Net metering record created"); setIsCreateOpen(false); utils.netMetering.getByProjectId.invalidate({ projectId }); },
+    onSuccess: () => { toast.success("Net metering record created"); setIsCreateOpen(false); refreshNetMeteringViews(); },
     onError: (err: any) => toast.error(err.message),
   });
   const updateMutation = trpc.netMetering.update.useMutation({
-    onSuccess: () => { toast.success("Net metering updated"); setIsEditOpen(false); utils.netMetering.getByProjectId.invalidate({ projectId }); },
+    onSuccess: () => { toast.success("Net metering updated"); setIsEditOpen(false); refreshNetMeteringViews(); },
     onError: (err: any) => toast.error(err.message),
   });
 
