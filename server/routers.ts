@@ -183,8 +183,10 @@ export const appRouter = router({
         totalContacts: contactsCountSnap.data().count,
         lowStockItems,
         conversionRate,
+        // Company cash figures are admin-only. Sub-admins still get the counts
+        // (item count, low-stock alerts) — just not the peso totals.
         totalRevenue,
-        inventoryValue: money(inventoryValue),
+        inventoryValue: ctx.user?.role === "admin" ? money(inventoryValue) : "0",
       };
     }),
     pipelineBreakdown: protectedProcedure.query(async () => {
