@@ -8,7 +8,7 @@ import PaginationControls from "@/components/PaginationControls";
 import DetailDialog from "@/components/DetailDialog";
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
-import { Search, Zap, Filter, ChevronDown, ChevronUp } from "lucide-react";
+import { Search, Zap, Filter, ChevronDown, ChevronUp, FileText } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 
@@ -36,7 +36,8 @@ export default function NetMeteringPayments() {
   useEffect(() => { setPage(1); }, [search, electricCompany, statusFilter, dateFrom, dateTo]);
 
   const totalPaid = paymentsList?.items?.reduce((s: number, r: any) => s + r.totalPaid, 0) || 0;
-  const withPayments = paymentsList?.items?.filter((r: any) => r.paymentCount > 0).length || 0;
+  const totalBilled = paymentsList?.items?.reduce((s: number, r: any) => s + (r.totalBilled || 0), 0) || 0;
+  const outstanding = totalBilled - totalPaid;
 
   return (
     <div className="space-y-6">
@@ -46,7 +47,13 @@ export default function NetMeteringPayments() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Total Billed</p>
+            <p className="text-xl font-bold text-foreground">{formatPHP(totalBilled)}</p>
+          </CardContent>
+        </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground">Total NM Payments</p>
@@ -55,14 +62,14 @@ export default function NetMeteringPayments() {
         </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total NM Records</p>
-            <p className="text-xl font-bold text-foreground">{paymentsList?.total || 0}</p>
+            <p className="text-xs text-muted-foreground">Outstanding Balance</p>
+            <p className="text-xl font-bold text-red-400">{formatPHP(outstanding)}</p>
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Records with Payments</p>
-            <p className="text-xl font-bold text-blue-400">{withPayments}</p>
+            <p className="text-xs text-muted-foreground">Total NM Records</p>
+            <p className="text-xl font-bold text-foreground">{paymentsList?.total || 0}</p>
           </CardContent>
         </Card>
       </div>
@@ -121,7 +128,9 @@ export default function NetMeteringPayments() {
                     <TableHead>Customer</TableHead>
                     <TableHead>Electric Co.</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Billed</TableHead>
                     <TableHead className="text-right">Total Paid</TableHead>
+                    <TableHead className="text-right">Balance</TableHead>
                     <TableHead className="text-center">Payments</TableHead>
                     <TableHead>Last Payment</TableHead>
                   </TableRow>
@@ -135,7 +144,13 @@ export default function NetMeteringPayments() {
                       <TableCell>
                         <Badge variant="outline" className="text-xs capitalize">{r.status?.replace(/_/g, " ") || "-"}</Badge>
                       </TableCell>
+                      <TableCell className="text-right text-foreground">
+                        {r.totalBilled ? formatPHP(r.totalBilled) : <span className="text-muted-foreground text-xs">Not billed</span>}
+                      </TableCell>
                       <TableCell className="text-right font-medium text-green-400">{formatPHP(r.totalPaid)}</TableCell>
+                      <TableCell className={`text-right font-medium ${r.balance > 0 ? "text-red-400" : "text-muted-foreground"}`}>
+                        {r.totalBilled ? formatPHP(r.balance) : "-"}
+                      </TableCell>
                       <TableCell className="text-center text-foreground">{r.paymentCount}</TableCell>
                       <TableCell className="text-muted-foreground">{r.lastPaymentDate ? new Date(r.lastPaymentDate).toLocaleDateString() : "-"}</TableCell>
                     </TableRow>
@@ -180,6 +195,14 @@ export default function NetMeteringPayments() {
             ],
           },
           {
+            title: "Billing",
+            fields: [
+              { label: "Billing No.", value: viewingPayment?.billingNumber || "Not billed yet" },
+              { label: "Total Billed", value: viewingPayment?.totalBilled ? formatPHP(viewingPayment.totalBilled) : "-" },
+              { label: "Balance", value: viewingPayment?.totalBilled ? formatPHP(viewingPayment.balance) : "-" },
+            ],
+          },
+          {
             title: "Payment Summary",
             fields: [
               { label: "Total Paid", value: formatPHP(viewingPayment?.totalPaid) },
@@ -192,16 +215,28 @@ export default function NetMeteringPayments() {
           },
         ]}
         footerLeft={
-          viewingPayment?.projectId ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="border-border"
-              onClick={() => { navigate(`/projects/${viewingPayment.projectId}`); setViewingPayment(null); }}
-            >
-              View Project
-            </Button>
-          ) : undefined
+          <>
+            {viewingPayment?.billingNumber && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border"
+                onClick={() => window.open(`/api/net-metering/${viewingPayment.id}/billing/pdf`, "_blank")}
+              >
+                <FileText className="h-4 w-4 mr-2" /> Print Billing
+              </Button>
+            )}
+            {viewingPayment?.projectId && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border"
+                onClick={() => { navigate(`/projects/${viewingPayment.projectId}`); setViewingPayment(null); }}
+              >
+                View Project
+              </Button>
+            )}
+          </>
         }
       />
     </div>

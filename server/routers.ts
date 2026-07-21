@@ -1959,12 +1959,14 @@ export const appRouter = router({
       limit: z.number().default(20),
     }).optional()).query(async ({ input }) => {
       const p = input || { page: 1, limit: 20 };
-      const [nmRecords, allPayments, projectsList] = await Promise.all([
+      const [nmRecords, allPayments, projectsList, allBillings] = await Promise.all([
         fsListAll<NetMetering>("net_metering"),
         fsListAll<NetMeteringPayment>("net_metering_payments"),
         fsListAll<Project>("projects", { select: ["name", "customerName"] }),
+        fsListAll<NetMeteringBilling>("net_metering_billings"),
       ]);
       const projectMap = new Map(projectsList.map(pr => [pr.id, pr]));
+      const billingMap = new Map(allBillings.map(b => [b.netMeteringId, b]));
       let results = nmRecords
         .slice()
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
@@ -1973,6 +1975,8 @@ export const appRouter = router({
           const totalPaid = payments.reduce((s, pm) => s + Number(pm.amount), 0);
           const lastPayment = payments.length > 0 ? payments.slice().sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())[0] : null;
           const project = nm.projectId ? projectMap.get(nm.projectId) : null;
+          const billing = billingMap.get(nm.id) || null;
+          const totalBilled = Number(billing?.total || 0);
           return {
             id: nm.id, projectId: nm.projectId, projectName: project?.name || nm.projectName || "-",
             customerName: project?.customerName || nm.clientName || "-",
@@ -1980,6 +1984,10 @@ export const appRouter = router({
             totalPaid, paymentCount: payments.length,
             lastPaymentDate: lastPayment?.paymentDate || null,
             status: nm.status,
+            // Billing side, so the roll-up shows what's owed as well as what's paid.
+            billingNumber: billing?.billingNumber || null,
+            totalBilled,
+            balance: totalBilled - totalPaid,
           };
         });
       // Apply filters
