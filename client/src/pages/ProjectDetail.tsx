@@ -11,7 +11,7 @@ import { trpc } from "@/lib/trpc";
 import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText } from "lucide-react";
 import { formatPHP } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { useLocation, useParams } from "wouter";
 
@@ -629,12 +629,53 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
   const { data: payments } = trpc.netMeteringPayments.list.useQuery({ projectId });
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
 
+  // --- Billing (what the client owes for the net metering processing) ---
+  type BillRow = { description: string; amount: string };
+  const [billRows, setBillRows] = useState<BillRow[]>([{ description: "", amount: "" }]);
+  const [billNotes, setBillNotes] = useState("");
+  const { data: billing } = trpc.netMeteringBillings.get.useQuery(
+    { netMeteringId: nmRecord?.id ?? 0 },
+    { enabled: !!nmRecord?.id }
+  );
+
+  // Load the saved billing into the editor once it arrives.
+  useEffect(() => {
+    if (billing) {
+      setBillRows(
+        (billing.items ?? []).length
+          ? billing.items.map((it: any) => ({ description: it.description ?? "", amount: String(it.amount ?? "") }))
+          : [{ description: "", amount: "" }]
+      );
+      setBillNotes(billing.notes ?? "");
+    }
+  }, [billing]);
+
+  const saveBillingMutation = trpc.netMeteringBillings.save.useMutation({
+    onSuccess: (data: any) => {
+      toast.success(`Billing ${data.billingNumber} saved`);
+      utils.netMeteringBillings.get.invalidate({ netMeteringId: nmRecord?.id ?? 0 });
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const billTotal = billRows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+
+  const handleSaveBilling = () => {
+    if (!nmRecord) { toast.error("No net metering record found. Create one first."); return; }
+    const items = billRows
+      .filter(r => r.description.trim() && parseFloat(r.amount) >= 0 && r.amount !== "")
+      .map(r => ({ description: r.description.trim(), amount: parseFloat(r.amount) }));
+    if (items.length === 0) { toast.error("Add at least one entry with a description and amount"); return; }
+    saveBillingMutation.mutate({ netMeteringId: nmRecord.id, projectId, items, notes: billNotes || undefined });
+  };
+
   const addMutation = trpc.netMeteringPayments.add.useMutation({
     onSuccess: () => {
       toast.success("Net metering payment recorded");
       setIsAddOpen(false);
       setPaymentMethod("");
       utils.netMeteringPayments.list.invalidate({ projectId });
+      utils.netMeteringPayments.centralList.invalidate();
     },
     onError: (err: any) => toast.error(err.message),
   });
@@ -642,6 +683,7 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
     onSuccess: () => {
       toast.success("Payment deleted");
       utils.netMeteringPayments.list.invalidate({ projectId });
+      utils.netMeteringPayments.centralList.invalidate();
     },
     onError: (err: any) => toast.error(err.message),
   });
@@ -681,11 +723,23 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
   return (
     <div className="space-y-4">
       {/* Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Total Billed</p>
+            <p className="text-xl font-bold text-foreground">{formatPHP(billing?.total ?? 0)}</p>
+          </CardContent>
+        </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground">Total NM Payments</p>
             <p className="text-xl font-bold text-green-400">{formatPHP(totalPaid)}</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Balance</p>
+            <p className="text-xl font-bold text-red-400">{formatPHP(Number(billing?.total ?? 0) - totalPaid)}</p>
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
@@ -695,6 +749,87 @@ function NetMeteringPaymentsSection({ projectId }: { projectId: number }) {
           </CardContent>
         </Card>
       </div>
+
+      {/* Billing — what the client owes for the net metering processing */}
+      <Card className="bg-card border-border">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-foreground text-lg flex items-center gap-2">
+              <FileText className="h-5 w-5 text-blue-400" /> NetMetering Process Billing
+              {billing?.billingNumber && (
+                <span className="font-mono text-xs text-muted-foreground">{billing.billingNumber}</span>
+              )}
+            </CardTitle>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-border"
+              disabled={!billing}
+              title={billing ? "Open printable billing" : "Save the billing first"}
+              onClick={() => nmRecord && window.open(`/api/net-metering/${nmRecord.id}/billing/pdf`, "_blank")}
+            >
+              <FileText className="h-4 w-4 mr-1" /> Print / PDF
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {!nmRecord ? (
+            <p className="text-muted-foreground text-sm py-2">No net metering record for this project yet — create one first.</p>
+          ) : (
+            <>
+              {billRows.map((row, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    value={row.description}
+                    onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, description: e.target.value } : r)))}
+                    placeholder="Description (e.g. LGU permit fee)"
+                    className="min-w-0 flex-1 bg-input border-border"
+                  />
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={row.amount}
+                    onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, amount: e.target.value } : r)))}
+                    placeholder="0.00"
+                    className="w-32 shrink-0 bg-input border-border"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 text-muted-foreground hover:text-red-400"
+                    onClick={() => setBillRows(billRows.filter((_, j) => j !== i))}
+                    disabled={billRows.length === 1}
+                    title="Remove entry"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+
+              <div className="flex items-center justify-between">
+                <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setBillRows([...billRows, { description: "", amount: "" }])}>
+                  <Plus className="h-4 w-4 mr-1" /> Add entry
+                </Button>
+                <div className="text-right">
+                  <span className="text-xs text-muted-foreground mr-2">Total</span>
+                  <span className="text-lg font-bold text-foreground tabular-nums">{formatPHP(billTotal)}</span>
+                </div>
+              </div>
+
+              <div>
+                <Label className="text-xs">Notes</Label>
+                <Textarea value={billNotes} onChange={(e) => setBillNotes(e.target.value)} placeholder="Optional notes shown on the billing..." className="bg-input border-border" />
+              </div>
+
+              <Button className="bg-primary text-primary-foreground" onClick={handleSaveBilling} disabled={saveBillingMutation.isPending}>
+                {saveBillingMutation.isPending ? "Saving..." : billing ? "Update Billing" : "Issue Billing"}
+              </Button>
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Payments List */}
       <Card className="bg-card border-border">
@@ -804,12 +939,22 @@ function NetMeteringSection({ projectId, project }: { projectId: number; project
   const { data: nmRecord } = trpc.netMetering.getByProjectId.useQuery({ projectId });
   const { data: setupTypes } = trpc.config.getOptions.useQuery({ category: "project_setup_type" });
 
+  // Refresh the standalone Net Metering tab and the payments roll-up too —
+  // otherwise a record created here sits behind a stale cache and looks like
+  // it never appeared on those screens.
+  const refreshNetMeteringViews = () => {
+    utils.netMetering.getByProjectId.invalidate({ projectId });
+    utils.netMetering.list.invalidate();
+    utils.netMetering.stats.invalidate();
+    utils.netMeteringPayments.centralList.invalidate();
+  };
+
   const createMutation = trpc.netMetering.create.useMutation({
-    onSuccess: () => { toast.success("Net metering record created"); setIsCreateOpen(false); utils.netMetering.getByProjectId.invalidate({ projectId }); },
+    onSuccess: () => { toast.success("Net metering record created"); setIsCreateOpen(false); refreshNetMeteringViews(); },
     onError: (err: any) => toast.error(err.message),
   });
   const updateMutation = trpc.netMetering.update.useMutation({
-    onSuccess: () => { toast.success("Net metering updated"); setIsEditOpen(false); utils.netMetering.getByProjectId.invalidate({ projectId }); },
+    onSuccess: () => { toast.success("Net metering updated"); setIsEditOpen(false); refreshNetMeteringViews(); },
     onError: (err: any) => toast.error(err.message),
   });
 

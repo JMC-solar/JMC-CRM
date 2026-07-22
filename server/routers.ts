@@ -51,6 +51,7 @@ import type {
   ProjectPayment,
   NetMetering,
   NetMeteringPayment,
+  NetMeteringBilling,
   SpecialQuotationTemplate,
   SpecialQuotation,
   CashRequest,
@@ -1958,12 +1959,14 @@ export const appRouter = router({
       limit: z.number().default(20),
     }).optional()).query(async ({ input }) => {
       const p = input || { page: 1, limit: 20 };
-      const [nmRecords, allPayments, projectsList] = await Promise.all([
+      const [nmRecords, allPayments, projectsList, allBillings] = await Promise.all([
         fsListAll<NetMetering>("net_metering"),
         fsListAll<NetMeteringPayment>("net_metering_payments"),
         fsListAll<Project>("projects", { select: ["name", "customerName"] }),
+        fsListAll<NetMeteringBilling>("net_metering_billings"),
       ]);
       const projectMap = new Map(projectsList.map(pr => [pr.id, pr]));
+      const billingMap = new Map(allBillings.map(b => [b.netMeteringId, b]));
       let results = nmRecords
         .slice()
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
@@ -1972,6 +1975,8 @@ export const appRouter = router({
           const totalPaid = payments.reduce((s, pm) => s + Number(pm.amount), 0);
           const lastPayment = payments.length > 0 ? payments.slice().sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())[0] : null;
           const project = nm.projectId ? projectMap.get(nm.projectId) : null;
+          const billing = billingMap.get(nm.id) || null;
+          const totalBilled = Number(billing?.total || 0);
           return {
             id: nm.id, projectId: nm.projectId, projectName: project?.name || nm.projectName || "-",
             customerName: project?.customerName || nm.clientName || "-",
@@ -1979,6 +1984,10 @@ export const appRouter = router({
             totalPaid, paymentCount: payments.length,
             lastPaymentDate: lastPayment?.paymentDate || null,
             status: nm.status,
+            // Billing side, so the roll-up shows what's owed as well as what's paid.
+            billingNumber: billing?.billingNumber || null,
+            totalBilled,
+            balance: totalBilled - totalPaid,
           };
         });
       // Apply filters
@@ -2003,6 +2012,53 @@ export const appRouter = router({
   }),
 
   // ============ ACKNOWLEDGEMENT RECEIPTS ============
+  // ============ NET METERING BILLING ============
+  // One billing sheet per net metering record. Admins and sub-admins build it
+  // up from free-text entries (description + amount); the total is what the
+  // client owes, and net metering payments are settled against it.
+  netMeteringBillings: router({
+    get: protectedProcedure.input(z.object({ netMeteringId: z.number() })).query(async ({ input }) => {
+      const rows = await fsListAll<NetMeteringBilling>("net_metering_billings", {
+        where: [["netMeteringId", "==", input.netMeteringId]],
+      });
+      return rows[0] ?? null;
+    }),
+
+    save: protectedProcedure.input(z.object({
+      netMeteringId: z.number(),
+      projectId: z.number().optional(),
+      items: z.array(z.object({ description: z.string().min(1), amount: z.number().nonnegative() })).min(1),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const items = input.items.map(it => ({ description: it.description, amount: money(it.amount) }));
+      const total = money(input.items.reduce((sum, it) => sum + it.amount, 0));
+      const existing = await fsListAll<NetMeteringBilling>("net_metering_billings", {
+        where: [["netMeteringId", "==", input.netMeteringId]],
+      });
+
+      if (existing[0]) {
+        await fsUpdateOne("net_metering_billings", existing[0].id, {
+          items, total,
+          notes: input.notes ?? existing[0].notes ?? null,
+          projectId: input.projectId ?? existing[0].projectId ?? null,
+        });
+        await fsAudit(ctx.user.id, ctx.user.name, "update", "net_metering_billing", existing[0].id, `Updated NM billing ${existing[0].billingNumber}: ${items.length} entries, total ₱${total}`);
+        return { success: true, id: existing[0].id, billingNumber: existing[0].billingNumber };
+      }
+
+      const billingNumber = `NMB-${Date.now().toString(36).toUpperCase()}`;
+      const id = await fsInsertOne("net_metering_billings", {
+        netMeteringId: input.netMeteringId,
+        projectId: input.projectId ?? null,
+        billingNumber, items, total,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "net_metering_billing", id, `Issued NM billing ${billingNumber}: ${items.length} entries, total ₱${total}`);
+      return { success: true, id, billingNumber };
+    }),
+  }),
+
   acknowledgements: router({
     createForProjectPayment: protectedProcedure.input(z.object({
       paymentId: z.number(), notes: z.string().optional(),

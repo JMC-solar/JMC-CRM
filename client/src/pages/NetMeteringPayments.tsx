@@ -5,10 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import PaginationControls from "@/components/PaginationControls";
-import DetailDialog from "@/components/DetailDialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
-import { Search, Zap, Filter, ChevronDown, ChevronUp } from "lucide-react";
+import { Search, Zap, Filter, ChevronDown, ChevronUp, FileText } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 
@@ -35,8 +36,33 @@ export default function NetMeteringPayments() {
 
   useEffect(() => { setPage(1); }, [search, electricCompany, statusFilter, dateFrom, dateTo]);
 
+  // Individual payments for the record being viewed, so each can get a receipt.
+  const { data: recordPayments } = trpc.netMeteringPayments.list.useQuery(
+    { netMeteringId: viewingPayment?.id ?? 0 },
+    { enabled: !!viewingPayment?.id }
+  );
+
+  const ackMutation = trpc.acknowledgements.createForNetMeteringPayment.useMutation({
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  /** Generate the acknowledgement receipt for a payment and open it for printing. */
+  const handleReceipt = async (paymentId: number) => {
+    const printWindow = window.open("about:blank", "_blank");
+    try {
+      const data = await ackMutation.mutateAsync({ paymentId });
+      toast.success(`Acknowledgement Receipt ${data.receiptNumber} generated`);
+      if (printWindow && data.id) {
+        printWindow.location.href = `/api/acknowledgement-receipts/${data.id}/print`;
+      }
+    } catch {
+      if (printWindow) printWindow.close();
+    }
+  };
+
   const totalPaid = paymentsList?.items?.reduce((s: number, r: any) => s + r.totalPaid, 0) || 0;
-  const withPayments = paymentsList?.items?.filter((r: any) => r.paymentCount > 0).length || 0;
+  const totalBilled = paymentsList?.items?.reduce((s: number, r: any) => s + (r.totalBilled || 0), 0) || 0;
+  const outstanding = totalBilled - totalPaid;
 
   return (
     <div className="space-y-6">
@@ -46,7 +72,13 @@ export default function NetMeteringPayments() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Total Billed</p>
+            <p className="text-xl font-bold text-foreground">{formatPHP(totalBilled)}</p>
+          </CardContent>
+        </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground">Total NM Payments</p>
@@ -55,14 +87,14 @@ export default function NetMeteringPayments() {
         </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total NM Records</p>
-            <p className="text-xl font-bold text-foreground">{paymentsList?.total || 0}</p>
+            <p className="text-xs text-muted-foreground">Outstanding Balance</p>
+            <p className="text-xl font-bold text-red-400">{formatPHP(outstanding)}</p>
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Records with Payments</p>
-            <p className="text-xl font-bold text-blue-400">{withPayments}</p>
+            <p className="text-xs text-muted-foreground">Total NM Records</p>
+            <p className="text-xl font-bold text-foreground">{paymentsList?.total || 0}</p>
           </CardContent>
         </Card>
       </div>
@@ -121,7 +153,9 @@ export default function NetMeteringPayments() {
                     <TableHead>Customer</TableHead>
                     <TableHead>Electric Co.</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Billed</TableHead>
                     <TableHead className="text-right">Total Paid</TableHead>
+                    <TableHead className="text-right">Balance</TableHead>
                     <TableHead className="text-center">Payments</TableHead>
                     <TableHead>Last Payment</TableHead>
                   </TableRow>
@@ -135,7 +169,13 @@ export default function NetMeteringPayments() {
                       <TableCell>
                         <Badge variant="outline" className="text-xs capitalize">{r.status?.replace(/_/g, " ") || "-"}</Badge>
                       </TableCell>
+                      <TableCell className="text-right text-foreground">
+                        {r.totalBilled ? formatPHP(r.totalBilled) : <span className="text-muted-foreground text-xs">Not billed</span>}
+                      </TableCell>
                       <TableCell className="text-right font-medium text-green-400">{formatPHP(r.totalPaid)}</TableCell>
+                      <TableCell className={`text-right font-medium ${r.balance > 0 ? "text-red-400" : "text-muted-foreground"}`}>
+                        {r.totalBilled ? formatPHP(r.balance) : "-"}
+                      </TableCell>
                       <TableCell className="text-center text-foreground">{r.paymentCount}</TableCell>
                       <TableCell className="text-muted-foreground">{r.lastPaymentDate ? new Date(r.lastPaymentDate).toLocaleDateString() : "-"}</TableCell>
                     </TableRow>
@@ -158,52 +198,107 @@ export default function NetMeteringPayments() {
         />
       )}
 
-      <DetailDialog
-        open={!!viewingPayment}
-        onOpenChange={(open) => !open && setViewingPayment(null)}
-        title={viewingPayment?.projectName}
-        subtitle={viewingPayment?.customerName}
-        headerRight={
-          viewingPayment ? (
-            <Badge variant="outline" className="text-xs capitalize">
-              {viewingPayment.status?.replace(/_/g, " ") || "-"}
-            </Badge>
-          ) : undefined
-        }
-        sections={[
-          {
-            title: "Net Metering Application",
-            fields: [
-              { label: "Project", value: viewingPayment?.projectName },
-              { label: "Customer", value: viewingPayment?.customerName },
-              { label: "Electric Company", value: viewingPayment?.electricCompany },
-            ],
-          },
-          {
-            title: "Payment Summary",
-            fields: [
-              { label: "Total Paid", value: formatPHP(viewingPayment?.totalPaid) },
-              { label: "Payment Count", value: viewingPayment?.paymentCount },
-              {
-                label: "Last Payment",
-                value: viewingPayment?.lastPaymentDate ? new Date(viewingPayment.lastPaymentDate).toLocaleDateString() : undefined,
-              },
-            ],
-          },
-        ]}
-        footerLeft={
-          viewingPayment?.projectId ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="border-border"
-              onClick={() => { navigate(`/projects/${viewingPayment.projectId}`); setViewingPayment(null); }}
-            >
-              View Project
-            </Button>
-          ) : undefined
-        }
-      />
+      {/* Record detail — billing summary + each payment with its receipt */}
+      <Dialog open={!!viewingPayment} onOpenChange={(open) => !open && setViewingPayment(null)}>
+        <DialogContent className="max-w-3xl bg-card border-border max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground flex items-center gap-3">
+              {viewingPayment?.projectName}
+              <Badge variant="outline" className="text-xs capitalize">
+                {viewingPayment?.status?.replace(/_/g, " ") || "-"}
+              </Badge>
+            </DialogTitle>
+            <p className="text-sm text-muted-foreground">{viewingPayment?.customerName}</p>
+          </DialogHeader>
+
+          {/* Billing summary */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Billing No.</p>
+              <p className="font-mono text-sm font-semibold text-foreground">{viewingPayment?.billingNumber || "Not billed"}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Total Billed</p>
+              <p className="text-sm font-bold text-foreground">{viewingPayment?.totalBilled ? formatPHP(viewingPayment.totalBilled) : "-"}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Total Paid</p>
+              <p className="text-sm font-bold text-green-400">{formatPHP(viewingPayment?.totalPaid)}</p>
+            </div>
+            <div className="rounded-lg border border-border bg-muted/20 p-3">
+              <p className="text-xs text-muted-foreground">Balance</p>
+              <p className="text-sm font-bold text-red-400">{viewingPayment?.totalBilled ? formatPHP(viewingPayment.balance) : "-"}</p>
+            </div>
+          </div>
+
+          {/* Payments with receipts */}
+          <div>
+            <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Payments</p>
+            {!recordPayments?.length ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">No payments recorded for this record yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-muted-foreground">
+                      <th className="text-left py-2 px-3">Date</th>
+                      <th className="text-right py-2 px-3">Amount</th>
+                      <th className="text-left py-2 px-3">Method</th>
+                      <th className="text-left py-2 px-3">Reference</th>
+                      <th className="text-right py-2 px-3">Receipt</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recordPayments.map((p: any) => (
+                      <tr key={p.id} className="border-b border-border/30 hover:bg-muted/10">
+                        <td className="py-2 px-3 text-foreground">{new Date(p.paymentDate).toLocaleDateString()}</td>
+                        <td className="py-2 px-3 text-right font-medium text-green-400">{formatPHP(p.amount)}</td>
+                        <td className="py-2 px-3 text-foreground">{p.paymentMethod || "-"}</td>
+                        <td className="py-2 px-3 text-foreground">{p.paymentReference || "-"}</td>
+                        <td className="py-2 px-3 text-right">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-border"
+                            onClick={() => handleReceipt(p.id)}
+                            disabled={ackMutation.isPending}
+                            title="Generate & print acknowledgement receipt"
+                          >
+                            <FileText className="h-4 w-4 mr-1" /> Receipt
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2 pt-2 border-t border-border">
+            {viewingPayment?.billingNumber && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border"
+                onClick={() => window.open(`/api/net-metering/${viewingPayment.id}/billing/pdf`, "_blank")}
+              >
+                <FileText className="h-4 w-4 mr-2" /> Print Billing
+              </Button>
+            )}
+            {viewingPayment?.projectId && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border"
+                onClick={() => { navigate(`/projects/${viewingPayment.projectId}`); setViewingPayment(null); }}
+              >
+                View Project
+              </Button>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
