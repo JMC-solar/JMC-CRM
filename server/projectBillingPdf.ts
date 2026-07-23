@@ -28,9 +28,16 @@ async function load(projectId: number) {
   const billing = billings[0] || null;
   payments.sort((a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime());
   // Billed total = the saved billing if there is one, else the project's contract amount.
-  const items: { description: string; amount: number }[] = billing?.items?.length
-    ? billing.items.map((it: any) => ({ description: it.description, amount: Number(it.amount || 0) }))
-    : [{ description: "Project contract amount", amount: Number(project.totalProjectAmount || 0) }];
+  // Normalise old rows (description + amount only) to qty 1 / unit price = amount.
+  const items: { description: string; sku: string | null; quantity: number; unitPrice: number; amount: number }[] =
+    billing?.items?.length
+      ? billing.items.map((it: any) => {
+          const amount = Number(it.amount || 0);
+          const quantity = it.quantity != null ? Number(it.quantity) : 1;
+          const unitPrice = it.unitPrice != null ? Number(it.unitPrice) : amount;
+          return { description: it.description, sku: it.sku ?? null, quantity, unitPrice, amount };
+        })
+      : [{ description: "Project contract amount", sku: null, quantity: 1, unitPrice: Number(project.totalProjectAmount || 0), amount: Number(project.totalProjectAmount || 0) }];
   const total = items.reduce((s, it) => s + it.amount, 0);
   const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   return { project, billing, payments, items, total, totalPaid, balance: total - totalPaid };
@@ -116,11 +123,15 @@ router.get("/api/projects/:id/billing/pdf", requireAuth, async (req, res) => {
     const docNo = billing?.billingNumber || `PB-${project.id}`;
 
     const rows = items.map((it, i) => `
-        <tr><td class="num">${i + 1}</td><td>${esc(it.description)}</td><td class="amt">${peso(it.amount)}</td></tr>`).join("");
+        <tr><td class="num">${i + 1}</td>
+          <td>${esc(it.description)}${it.sku ? `<span class="muted"> · ${esc(it.sku)}</span>` : ""}</td>
+          <td class="amt">${it.quantity}</td>
+          <td class="amt">${peso(it.unitPrice)}</td>
+          <td class="amt">${peso(it.amount)}</td></tr>`).join("");
 
     const inner = header(project, "Project Billing", docNo, `Issued ${fmtDate(billing?.createdAt || new Date())}`) + `
     <h2>Billing Details</h2>
-    <table><thead><tr><th class="num">#</th><th>Description</th><th class="amt">Amount</th></tr></thead>
+    <table><thead><tr><th class="num">#</th><th>Description</th><th class="amt">Qty</th><th class="amt">Unit Price</th><th class="amt">Amount</th></tr></thead>
       <tbody>${rows}</tbody></table>
     <div class="totals">
       <div class="grand"><span>Total Amount Due</span><span>${peso(total)}</span></div>

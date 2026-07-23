@@ -2027,11 +2027,24 @@ export const appRouter = router({
 
     save: protectedProcedure.input(z.object({
       projectId: z.number(),
-      items: z.array(z.object({ description: z.string().min(1), amount: z.number().nonnegative() })).min(1),
+      items: z.array(z.object({
+        description: z.string().min(1),
+        inventoryItemId: z.number().nullable().optional(),
+        sku: z.string().nullable().optional(),
+        quantity: z.number().positive().default(1),
+        unitPrice: z.number().nonnegative(),
+      })).min(1),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
-      const items: ProjectBillingItem[] = input.items.map(it => ({ description: it.description, amount: money(it.amount) }));
-      const total = money(input.items.reduce((sum, it) => sum + it.amount, 0));
+      const items: ProjectBillingItem[] = input.items.map(it => ({
+        description: it.description,
+        inventoryItemId: it.inventoryItemId ?? null,
+        sku: it.sku ?? null,
+        quantity: it.quantity,
+        unitPrice: money(it.unitPrice),
+        amount: money(it.quantity * it.unitPrice),
+      }));
+      const total = money(input.items.reduce((sum, it) => sum + it.quantity * it.unitPrice, 0));
       const existing = await fsListAll<ProjectBilling>("project_billings", {
         where: [["projectId", "==", input.projectId]],
       });

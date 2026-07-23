@@ -466,9 +466,19 @@ export interface ProjectPayment {
 }
 
 // ============ NET METERING PAYMENTS ============
-/** One line on a project billing — the contract amount and any additions. */
+/**
+ * One line on a project billing. Additions are usually inventory items (with
+ * quantity × unit price), but a line can also be a free-text lump sum such as
+ * the project contract amount. `amount` is always the line total.
+ * Older records only have description + amount — read them via a normaliser
+ * that fills quantity = 1 and unitPrice = amount.
+ */
 export interface ProjectBillingItem {
   description: string;
+  inventoryItemId?: number | null;
+  sku?: string | null;
+  quantity?: number;
+  unitPrice?: string;
   amount: string;
 }
 
