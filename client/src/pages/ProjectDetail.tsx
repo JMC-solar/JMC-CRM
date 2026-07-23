@@ -452,6 +452,42 @@ function PaymentsSection({ projectId }: { projectId: number }) {
   const { data: summary } = trpc.projects.paymentSummary.useQuery({ projectId });
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
 
+  // --- Project Billing (contract amount + additions = what the client owes) ---
+  type BillRow = { description: string; amount: string };
+  const [isBillingOpen, setIsBillingOpen] = useState(false);
+  const [billRows, setBillRows] = useState<BillRow[]>([{ description: "", amount: "" }]);
+  const [billNotes, setBillNotes] = useState("");
+  const { data: billing } = trpc.projectBillings.get.useQuery({ projectId });
+
+  const saveBillingMutation = trpc.projectBillings.save.useMutation({
+    onSuccess: (data: any) => { toast.success(`Billing ${data.billingNumber} saved`); utils.projectBillings.get.invalidate({ projectId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  // Seed the editor when opening: the saved billing if there is one, otherwise
+  // the project's contract amount as the first (editable) line.
+  const openBilling = () => {
+    if (billing?.items?.length) {
+      setBillRows(billing.items.map((it: any) => ({ description: it.description ?? "", amount: String(it.amount ?? "") })));
+      setBillNotes(billing.notes ?? "");
+    } else {
+      const contract = Number(summary?.totalProjectAmount || 0);
+      setBillRows([{ description: "Project contract amount", amount: contract ? String(contract) : "" }]);
+      setBillNotes("");
+    }
+    setIsBillingOpen(true);
+  };
+
+  const billTotal = billRows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+
+  const handleSaveBilling = () => {
+    const items = billRows
+      .filter(r => r.description.trim() && r.amount !== "" && parseFloat(r.amount) >= 0)
+      .map(r => ({ description: r.description.trim(), amount: parseFloat(r.amount) }));
+    if (items.length === 0) { toast.error("Add at least one entry with a description and amount"); return; }
+    saveBillingMutation.mutate({ projectId, items, notes: billNotes || undefined });
+  };
+
   const addMutation = trpc.projects.addPayment.useMutation({
     onSuccess: () => {
       toast.success("Payment recorded");
@@ -537,9 +573,14 @@ function PaymentsSection({ projectId }: { projectId: number }) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-foreground text-lg flex items-center gap-2"><DollarSign className="h-5 w-5 text-green-400" /> Payment Records</CardTitle>
-            <Button onClick={() => setIsAddOpen(true)} size="sm" className="bg-primary text-primary-foreground">
-              <Plus className="h-4 w-4 mr-1" /> Add Payment
-            </Button>
+            <div className="flex gap-2">
+              <Button onClick={openBilling} size="sm" variant="outline" className="border-border">
+                <FileText className="h-4 w-4 mr-1" /> Project Billing
+              </Button>
+              <Button onClick={() => setIsAddOpen(true)} size="sm" className="bg-primary text-primary-foreground">
+                <Plus className="h-4 w-4 mr-1" /> Add Payment
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -614,6 +655,82 @@ function PaymentsSection({ projectId }: { projectId: number }) {
               {addMutation.isPending ? "Recording..." : "Record Payment"}
             </Button>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project Billing Dialog */}
+      <Dialog open={isBillingOpen} onOpenChange={setIsBillingOpen}>
+        <DialogContent className="max-w-lg bg-card border-border max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground flex items-center gap-2">
+              Project Billing
+              {billing?.billingNumber && <span className="font-mono text-xs text-muted-foreground">{billing.billingNumber}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              Starts from the project's contract amount — edit it or add extra entries (additions).
+              The total is what the client is billed.
+            </p>
+
+            {billRows.map((row, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  value={row.description}
+                  onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, description: e.target.value } : r)))}
+                  placeholder="Description (e.g. Additional wiring)"
+                  className="min-w-0 flex-1 bg-input border-border"
+                />
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={row.amount}
+                  onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, amount: e.target.value } : r)))}
+                  placeholder="0.00"
+                  className="w-32 shrink-0 bg-input border-border"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 text-muted-foreground hover:text-red-400"
+                  onClick={() => setBillRows(billRows.filter((_, j) => j !== i))}
+                  disabled={billRows.length === 1}
+                  title="Remove entry"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+
+            <div className="flex items-center justify-between">
+              <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setBillRows([...billRows, { description: "", amount: "" }])}>
+                <Plus className="h-4 w-4 mr-1" /> Add entry
+              </Button>
+              <div className="text-right">
+                <span className="text-xs text-muted-foreground mr-2">Total Billed</span>
+                <span className="text-lg font-bold text-foreground tabular-nums">{formatPHP(billTotal)}</span>
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-xs">Notes</Label>
+              <Textarea value={billNotes} onChange={(e) => setBillNotes(e.target.value)} placeholder="Optional notes shown on the billing..." className="bg-input border-border" />
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-3 border-t border-border">
+              <Button className="bg-primary text-primary-foreground" onClick={handleSaveBilling} disabled={saveBillingMutation.isPending}>
+                {saveBillingMutation.isPending ? "Saving..." : billing ? "Update Billing" : "Save Billing"}
+              </Button>
+              <Button variant="outline" className="border-border" disabled={!billing} title={billing ? "Open printable billing" : "Save the billing first"} onClick={() => window.open(`/api/projects/${projectId}/billing/pdf`, "_blank")}>
+                <FileText className="h-4 w-4 mr-1" /> Print Billing
+              </Button>
+              <Button variant="outline" className="border-border" title="Statement of account (charges + payments + balance)" onClick={() => window.open(`/api/projects/${projectId}/soa/pdf`, "_blank")}>
+                <FileText className="h-4 w-4 mr-1" /> Statement of Account
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

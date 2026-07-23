@@ -52,6 +52,8 @@ import type {
   NetMetering,
   NetMeteringPayment,
   NetMeteringBilling,
+  ProjectBilling,
+  ProjectBillingItem,
   SpecialQuotationTemplate,
   SpecialQuotation,
   CashRequest,
@@ -2012,6 +2014,48 @@ export const appRouter = router({
   }),
 
   // ============ ACKNOWLEDGEMENT RECEIPTS ============
+  // ============ PROJECT BILLING ============
+  // One billing sheet per project. Seeded from the contract amount, with
+  // additions added on top; the total is the final amount billed to the client.
+  projectBillings: router({
+    get: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
+      const rows = await fsListAll<ProjectBilling>("project_billings", {
+        where: [["projectId", "==", input.projectId]],
+      });
+      return rows[0] ?? null;
+    }),
+
+    save: protectedProcedure.input(z.object({
+      projectId: z.number(),
+      items: z.array(z.object({ description: z.string().min(1), amount: z.number().nonnegative() })).min(1),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const items: ProjectBillingItem[] = input.items.map(it => ({ description: it.description, amount: money(it.amount) }));
+      const total = money(input.items.reduce((sum, it) => sum + it.amount, 0));
+      const existing = await fsListAll<ProjectBilling>("project_billings", {
+        where: [["projectId", "==", input.projectId]],
+      });
+
+      if (existing[0]) {
+        await fsUpdateOne("project_billings", existing[0].id, {
+          items, total, notes: input.notes ?? existing[0].notes ?? null,
+        });
+        await fsAudit(ctx.user.id, ctx.user.name, "update", "project_billing", existing[0].id, `Updated project billing ${existing[0].billingNumber}: ${items.length} entries, total ₱${total}`);
+        return { success: true, id: existing[0].id, billingNumber: existing[0].billingNumber };
+      }
+
+      const billingNumber = `PB-${Date.now().toString(36).toUpperCase()}`;
+      const id = await fsInsertOne("project_billings", {
+        projectId: input.projectId,
+        billingNumber, items, total,
+        notes: input.notes ?? null,
+        createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "project_billing", id, `Issued project billing ${billingNumber}: ${items.length} entries, total ₱${total}`);
+      return { success: true, id, billingNumber };
+    }),
+  }),
+
   // ============ NET METERING BILLING ============
   // One billing sheet per net metering record. Admins and sub-admins build it
   // up from free-text entries (description + amount); the total is what the
