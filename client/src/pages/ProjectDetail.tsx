@@ -11,6 +11,8 @@ import { trpc } from "@/lib/trpc";
 import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText } from "lucide-react";
 import { formatPHP } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { useLocation, useParams } from "wouter";
@@ -452,6 +454,73 @@ function PaymentsSection({ projectId }: { projectId: number }) {
   const { data: summary } = trpc.projects.paymentSummary.useQuery({ projectId });
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
 
+  // --- Project Billing (contract amount + additions = what the client owes) ---
+  // Additions are usually inventory items (qty × unit price); a line can also be
+  // a free-text lump sum like the contract amount. Pulling from inventory does
+  // NOT touch stock — you can bill items you'll order later.
+  type BillRow = { description: string; inventoryItemId: number | null; sku: string | null; quantity: string; unitPrice: string };
+  const emptyBillRow = (): BillRow => ({ description: "", inventoryItemId: null, sku: null, quantity: "1", unitPrice: "" });
+  const [isBillingOpen, setIsBillingOpen] = useState(false);
+  const [billRows, setBillRows] = useState<BillRow[]>([emptyBillRow()]);
+  const [billNotes, setBillNotes] = useState("");
+  const [itemPickerOpen, setItemPickerOpen] = useState(false);
+  const { data: billing } = trpc.projectBillings.get.useQuery({ projectId });
+  const { data: inventoryList } = trpc.inventory.listAll.useQuery();
+
+  const saveBillingMutation = trpc.projectBillings.save.useMutation({
+    onSuccess: (data: any) => { toast.success(`Billing ${data.billingNumber} saved`); utils.projectBillings.get.invalidate({ projectId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const rowTotal = (r: BillRow) => (parseFloat(r.quantity) || 0) * (parseFloat(r.unitPrice) || 0);
+
+  // Seed the editor when opening: the saved billing if there is one, otherwise
+  // the project's contract amount as the first (editable) line.
+  const openBilling = () => {
+    if (billing?.items?.length) {
+      setBillRows(billing.items.map((it: any) => ({
+        description: it.description ?? "",
+        inventoryItemId: it.inventoryItemId ?? null,
+        sku: it.sku ?? null,
+        quantity: String(it.quantity ?? 1),
+        unitPrice: String(it.unitPrice ?? it.amount ?? ""),
+      })));
+      setBillNotes(billing.notes ?? "");
+    } else {
+      const contract = Number(summary?.totalProjectAmount || 0);
+      setBillRows([{ description: "Project contract amount", inventoryItemId: null, sku: null, quantity: "1", unitPrice: contract ? String(contract) : "" }]);
+      setBillNotes("");
+    }
+    setIsBillingOpen(true);
+  };
+
+  const addInventoryRow = (item: any) => {
+    setBillRows((rows) => [...rows, {
+      description: item.name,
+      inventoryItemId: item.id,
+      sku: item.sku ?? null,
+      quantity: "1",
+      unitPrice: item.sellingPrice != null ? String(item.sellingPrice) : "",
+    }]);
+    setItemPickerOpen(false);
+  };
+
+  const billTotal = billRows.reduce((s, r) => s + rowTotal(r), 0);
+
+  const handleSaveBilling = () => {
+    const items = billRows
+      .filter(r => r.description.trim() && r.unitPrice !== "" && parseFloat(r.unitPrice) >= 0 && parseFloat(r.quantity) > 0)
+      .map(r => ({
+        description: r.description.trim(),
+        inventoryItemId: r.inventoryItemId,
+        sku: r.sku,
+        quantity: parseFloat(r.quantity),
+        unitPrice: parseFloat(r.unitPrice),
+      }));
+    if (items.length === 0) { toast.error("Add at least one entry with a description, quantity and unit price"); return; }
+    saveBillingMutation.mutate({ projectId, items, notes: billNotes || undefined });
+  };
+
   const addMutation = trpc.projects.addPayment.useMutation({
     onSuccess: () => {
       toast.success("Payment recorded");
@@ -537,9 +606,14 @@ function PaymentsSection({ projectId }: { projectId: number }) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-foreground text-lg flex items-center gap-2"><DollarSign className="h-5 w-5 text-green-400" /> Payment Records</CardTitle>
-            <Button onClick={() => setIsAddOpen(true)} size="sm" className="bg-primary text-primary-foreground">
-              <Plus className="h-4 w-4 mr-1" /> Add Payment
-            </Button>
+            <div className="flex gap-2">
+              <Button onClick={openBilling} size="sm" variant="outline" className="border-border">
+                <FileText className="h-4 w-4 mr-1" /> Project Billing
+              </Button>
+              <Button onClick={() => setIsAddOpen(true)} size="sm" className="bg-primary text-primary-foreground">
+                <Plus className="h-4 w-4 mr-1" /> Add Payment
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -614,6 +688,130 @@ function PaymentsSection({ projectId }: { projectId: number }) {
               {addMutation.isPending ? "Recording..." : "Record Payment"}
             </Button>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project Billing Dialog */}
+      <Dialog open={isBillingOpen} onOpenChange={setIsBillingOpen}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground flex items-center gap-2">
+              Project Billing
+              {billing?.billingNumber && <span className="font-mono text-xs text-muted-foreground">{billing.billingNumber}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">
+              Starts from the project's contract amount. Add items from inventory (they carry a unit price) or add a manual line.
+              Set the quantity — the total is what the client is billed. Adding inventory items here does not change your stock.
+            </p>
+
+            {/* Column labels */}
+            <div className="hidden sm:flex items-center gap-2 px-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              <span className="flex-1">Item / Description</span>
+              <span className="w-16 text-center">Qty</span>
+              <span className="w-28 text-right">Unit Price</span>
+              <span className="w-28 text-right">Line Total</span>
+              <span className="w-8"></span>
+            </div>
+
+            {billRows.map((row, i) => (
+              <div key={i} className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <Input
+                    value={row.description}
+                    onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, description: e.target.value } : r)))}
+                    placeholder="Item / description"
+                    className="bg-input border-border"
+                  />
+                  {(row.sku || row.inventoryItemId) && (
+                    <span className="text-[10px] text-muted-foreground">{row.sku}{row.inventoryItemId ? " · from inventory" : ""}</span>
+                  )}
+                </div>
+                <Input
+                  type="number" min="1" step="1" value={row.quantity}
+                  onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, quantity: e.target.value } : r)))}
+                  className="w-16 shrink-0 bg-input border-border text-center" title="Quantity"
+                />
+                <Input
+                  type="number" min="0" step="0.01" value={row.unitPrice}
+                  onChange={(e) => setBillRows(billRows.map((r, j) => (j === i ? { ...r, unitPrice: e.target.value } : r)))}
+                  placeholder="0.00" className="w-28 shrink-0 bg-input border-border text-right" title="Unit price"
+                />
+                <div className="w-28 shrink-0 pt-2 text-right text-sm font-medium tabular-nums text-foreground">{formatPHP(rowTotal(row))}</div>
+                <Button
+                  type="button" variant="ghost" size="sm"
+                  className="w-8 shrink-0 px-0 text-muted-foreground hover:text-red-400"
+                  onClick={() => setBillRows(billRows.filter((_, j) => j !== i))}
+                  disabled={billRows.length === 1} title="Remove entry"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+
+            <div className="flex items-center justify-between">
+              <div className="flex gap-2">
+                <Popover open={itemPickerOpen} onOpenChange={setItemPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button type="button" variant="outline" size="sm" className="border-border">
+                      <Package className="h-4 w-4 mr-1" /> Add from inventory
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[360px] p-0 bg-card border-border" align="start">
+                    <Command className="bg-card">
+                      <CommandInput placeholder="Search item by name, SKU, category..." className="text-foreground" />
+                      <CommandList>
+                        <CommandEmpty className="text-muted-foreground p-4 text-sm">No items found.</CommandEmpty>
+                        <CommandGroup>
+                          {inventoryList?.map((item: any) => (
+                            <CommandItem
+                              key={item.id}
+                              value={`${item.name} ${item.sku} ${item.category}`}
+                              onSelect={() => addInventoryRow(item)}
+                              className="text-foreground"
+                            >
+                              <div className="flex w-full flex-col">
+                                <span className="font-medium">{item.name}</span>
+                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <span>{item.sku} • {item.category}</span>
+                                  {item.sellingPrice != null && <span className="ml-auto">₱{Number(item.sellingPrice).toLocaleString()}</span>}
+                                </div>
+                              </div>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setBillRows([...billRows, emptyBillRow()])}>
+                  <Plus className="h-4 w-4 mr-1" /> Add manual
+                </Button>
+              </div>
+              <div className="text-right">
+                <span className="text-xs text-muted-foreground mr-2">Total Billed</span>
+                <span className="text-lg font-bold text-foreground tabular-nums">{formatPHP(billTotal)}</span>
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-xs">Notes</Label>
+              <Textarea value={billNotes} onChange={(e) => setBillNotes(e.target.value)} placeholder="Optional notes shown on the billing..." className="bg-input border-border" />
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-3 border-t border-border">
+              <Button className="bg-primary text-primary-foreground" onClick={handleSaveBilling} disabled={saveBillingMutation.isPending}>
+                {saveBillingMutation.isPending ? "Saving..." : billing ? "Update Billing" : "Save Billing"}
+              </Button>
+              <Button variant="outline" className="border-border" disabled={!billing} title={billing ? "Open printable billing" : "Save the billing first"} onClick={() => window.open(`/api/projects/${projectId}/billing/pdf`, "_blank")}>
+                <FileText className="h-4 w-4 mr-1" /> Print Billing
+              </Button>
+              <Button variant="outline" className="border-border" title="Statement of account (charges + payments + balance)" onClick={() => window.open(`/api/projects/${projectId}/soa/pdf`, "_blank")}>
+                <FileText className="h-4 w-4 mr-1" /> Statement of Account
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
