@@ -53,23 +53,28 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
     let nmData: NetMetering | null = null;
 
     if (ack.type === "project_payment") {
-      // Fetch the project
-      const project = await getById<Project>("projects", ack.referenceId);
-      if (project) {
-        projectData = project;
-        totalProjectAmount = Number(project.totalProjectAmount || 0);
+      // referenceId is the project_payment id (NOT the project id). Resolve the
+      // payment first, then its project — otherwise a stranger's project whose id
+      // happens to equal this payment id gets loaded, and every figure is wrong.
+      const payment = await getById<ProjectPayment>("project_payments", ack.referenceId);
+      if (payment) {
+        const project = await getById<Project>("projects", payment.projectId);
+        if (project) {
+          projectData = project;
+          totalProjectAmount = Number(project.totalProjectAmount || 0);
 
-        // Fetch quotation items if project has a linked quotation
-        if (project.quotationId) {
-          const quot = await getById<Quotation>("quotations", project.quotationId);
-          if (quot) {
-            quotationData = quot;
-            quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
+          // Fetch quotation items if project has a linked quotation
+          if (project.quotationId) {
+            const quot = await getById<Quotation>("quotations", project.quotationId);
+            if (quot) {
+              quotationData = quot;
+              quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
+            }
           }
         }
 
-        // Fetch all payments for this project up to and including this payment
-        allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", project.id]] });
+        // All payments for the project this payment belongs to.
+        allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", payment.projectId]] });
       }
     } else if (ack.type === "net_metering_payment") {
       // referenceId is the netMeteringPayment ID - find the NM record
@@ -484,8 +489,7 @@ function generateAcknowledgementHtml(ack: any, context: {
         </div>
         <div class="info-box">
           <h3>Project Details</h3>
-          <p><strong>${escapeHtml(projectName)}</strong></p>
-          ${projectDescription ? `<p><strong>Description:</strong> ${escapeHtml(projectDescription)}</p>` : ""}
+          <p><strong>${escapeHtml(projectDescription || projectName)}</strong></p>
           ${setupType ? `<p><strong>Type:</strong> ${escapeHtml(setupType)}</p>` : ""}
           ${systemSize ? `<p><strong>System Size:</strong> ${escapeHtml(systemSize)}</p>` : ""}
           ${nmData ? `<p><strong>Electric Company:</strong> ${escapeHtml(nmData.electricCompany || "-")}</p>` : ""}
