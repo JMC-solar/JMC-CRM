@@ -53,23 +53,28 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
     let nmData: NetMetering | null = null;
 
     if (ack.type === "project_payment") {
-      // Fetch the project
-      const project = await getById<Project>("projects", ack.referenceId);
-      if (project) {
-        projectData = project;
-        totalProjectAmount = Number(project.totalProjectAmount || 0);
+      // referenceId is the project_payment id (NOT the project id). Resolve the
+      // payment first, then its project — otherwise a stranger's project whose id
+      // happens to equal this payment id gets loaded, and every figure is wrong.
+      const payment = await getById<ProjectPayment>("project_payments", ack.referenceId);
+      if (payment) {
+        const project = await getById<Project>("projects", payment.projectId);
+        if (project) {
+          projectData = project;
+          totalProjectAmount = Number(project.totalProjectAmount || 0);
 
-        // Fetch quotation items if project has a linked quotation
-        if (project.quotationId) {
-          const quot = await getById<Quotation>("quotations", project.quotationId);
-          if (quot) {
-            quotationData = quot;
-            quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
+          // Fetch quotation items if project has a linked quotation
+          if (project.quotationId) {
+            const quot = await getById<Quotation>("quotations", project.quotationId);
+            if (quot) {
+              quotationData = quot;
+              quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
+            }
           }
         }
 
-        // Fetch all payments for this project up to and including this payment
-        allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", project.id]] });
+        // All payments for the project this payment belongs to.
+        allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", payment.projectId]] });
       }
     } else if (ack.type === "net_metering_payment") {
       // referenceId is the netMeteringPayment ID - find the NM record
@@ -379,11 +384,17 @@ function generateAcknowledgementHtml(ack: any, context: {
     </tr>`;
   }).join("");
 
-  // Build payment history rows
-  const paymentRows = allPayments.map((p, i) => {
+  // Build payment history rows — statement-of-account style with a running
+  // balance. Sorted oldest-first so each payment deducts from the project total.
+  const sortedPayments = [...allPayments].sort((a, b) =>
+    new Date(a.paymentDate as any).getTime() - new Date(b.paymentDate as any).getTime());
+  let runningPaid = 0;
+  const paymentRows = sortedPayments.map((p, i) => {
     const pDate = p.paymentDate ? new Date(p.paymentDate).toLocaleDateString("en-PH", { year: "numeric", month: "short", day: "numeric" }) : "-";
-    const isCurrentPayment = Number(p.amount) === currentPayment && 
-      p.paymentDate && ack.paymentDate && 
+    runningPaid += Number(p.amount || 0);
+    const runningBalance = totalProjectAmount - runningPaid;
+    const isCurrentPayment = Number(p.amount) === currentPayment &&
+      p.paymentDate && ack.paymentDate &&
       new Date(p.paymentDate).toDateString() === new Date(ack.paymentDate).toDateString();
     const highlight = isCurrentPayment ? ' style="background: #f0fdf4;"' : '';
     return `
@@ -391,6 +402,7 @@ function generateAcknowledgementHtml(ack: any, context: {
       <td style="text-align: center; color: #64748b;">${i + 1}</td>
       <td>${pDate}</td>
       <td style="text-align: right;">${formatPHP(p.amount)}</td>
+      <td style="text-align: right;">${formatPHP(runningBalance)}</td>
       <td>${p.paymentMethod || "-"}</td>
       <td>${p.paymentReference || "-"}</td>
     </tr>`;
@@ -400,6 +412,7 @@ function generateAcknowledgementHtml(ack: any, context: {
   const customerName = ack.customerName || projectData?.customerName || quotationData?.customerName || "-";
   const customerAddress = projectData?.address || quotationData?.customerAddress || "";
   const projectName = projectData?.name || ack.projectReference || quotationData?.title || "-";
+  const projectDescription = projectData?.description || "";
   const setupType = projectData?.typeOfSetup || nmData?.typeOfSetup || "";
   const systemSize = projectData?.sizeOfSetup || nmData?.sizeOfSetup || "";
 
@@ -476,7 +489,7 @@ function generateAcknowledgementHtml(ack: any, context: {
         </div>
         <div class="info-box">
           <h3>Project Details</h3>
-          <p><strong>${escapeHtml(projectName)}</strong></p>
+          <p><strong>${escapeHtml(projectDescription || projectName)}</strong></p>
           ${setupType ? `<p><strong>Type:</strong> ${escapeHtml(setupType)}</p>` : ""}
           ${systemSize ? `<p><strong>System Size:</strong> ${escapeHtml(systemSize)}</p>` : ""}
           ${nmData ? `<p><strong>Electric Company:</strong> ${escapeHtml(nmData.electricCompany || "-")}</p>` : ""}
@@ -508,6 +521,16 @@ function generateAcknowledgementHtml(ack: any, context: {
         </div>
       </div>
 
+      <!-- Account Summary: the statement-of-account math (project total - paid = balance) -->
+      ${totalProjectAmount > 0 || totalPaid > 0 ? `
+      <div class="section-title">Account Summary</div>
+      <div class="financial-summary">
+        <div class="fin-item"><div class="fin-label">Total Project Amount</div><div class="fin-value">${formatPHP(totalProjectAmount)}</div></div>
+        <div class="fin-item highlight"><div class="fin-label">Total Paid</div><div class="fin-value">${formatPHP(totalPaid)}</div></div>
+        <div class="fin-item"><div class="fin-label">This Payment</div><div class="fin-value">${formatPHP(currentPayment)}</div></div>
+        <div class="fin-item balance"><div class="fin-label">Balance Remaining</div><div class="fin-value">${formatPHP(balance)}</div></div>
+      </div>` : ""}
+
       <!-- Itemized Breakdown (if quotation items exist) -->
       ${quotationItemsData.length > 0 ? `
       <div class="section-title">Itemized Breakdown</div>
@@ -538,23 +561,24 @@ function generateAcknowledgementHtml(ack: any, context: {
             <td style="text-align: right;">-${formatPHP(quotationData.discountAmount)}</td>
           </tr>` : ""}
           <tr class="table-footer">
-            <td colspan="4" style="text-align: right;"><strong>Total Project Amount:</strong></td>
-            <td style="text-align: right;"><strong>${formatPHP(totalProjectAmount)}</strong></td>
+            <td colspan="4" style="text-align: right;"><strong>Quotation Total:</strong></td>
+            <td style="text-align: right;"><strong>${formatPHP(quotationData?.totalAmount || quotationItemsData.reduce((s, i) => s + Number(i.totalPrice || 0), 0))}</strong></td>
           </tr>
         </tbody>
       </table>` : ""}
 
 
 
-      <!-- Payment History -->
-      ${allPayments.length > 1 ? `
-      <div class="section-title">Payment History</div>
+      <!-- Payment History (Statement of Account) -->
+      ${allPayments.length >= 1 ? `
+      <div class="section-title">Payment History (Statement of Account)</div>
       <table>
         <thead>
           <tr>
             <th style="width: 40px; text-align: center;">#</th>
             <th>Date</th>
-            <th style="text-align: right;">Amount</th>
+            <th style="text-align: right;">Payment</th>
+            <th style="text-align: right;">Balance After</th>
             <th>Method</th>
             <th>Reference</th>
           </tr>
@@ -564,6 +588,7 @@ function generateAcknowledgementHtml(ack: any, context: {
           <tr class="table-footer">
             <td colspan="2" style="text-align: right;"><strong>Total Paid:</strong></td>
             <td style="text-align: right;"><strong>${formatPHP(totalPaid)}</strong></td>
+            <td style="text-align: right;"><strong>${formatPHP(balance)}</strong></td>
             <td colspan="2"></td>
           </tr>
         </tbody>
