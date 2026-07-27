@@ -22,5 +22,5 @@ export function formatPHP(value: string | number | null | undefined, showDash = 
 export function homePathForRole(role?: string | null): string {
   if (role === "admin") return "/dashboard";
   if (["purchaser", "staff", "sales_rep"].includes(role || "")) return "/inventory";
-  return "/leads"; // subadmin (and any other non-admin) \u2014 first CRM page
+  return "/projects"; // subadmin (and any other non-admin) \u2014 Project Monitoring
 }
