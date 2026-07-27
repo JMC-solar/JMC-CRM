@@ -248,6 +248,8 @@ function DashboardLayoutContent({
     if (isLimitedRole) {
       return section.title === "Inventory";
     }
+    // Dashboard & Analytics (the "Overview" section) are admin-only.
+    if (section.title === "Overview" && userRole !== "admin") return false;
     // Admin and Finance sections only visible to admin and subadmin
     if ((section.title === "Admin" || section.title === "Finance") && userRole !== "admin" && userRole !== "subadmin") return false;
     // SubAdmin can see User Management but not Settings

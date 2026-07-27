@@ -2,7 +2,11 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConfirmRoot } from "@/lib/confirm";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, useLocation } from "wouter";
+import { useEffect, type ReactNode } from "react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { homePathForRole } from "@/lib/utils";
+import { DashboardLayoutSkeleton } from "@/components/DashboardLayoutSkeleton";
 import DashboardLayout from "./components/DashboardLayout";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
@@ -56,6 +60,21 @@ function PublicRouter() {
   );
 }
 
+// Gate for admin-only pages (Dashboard, Analytics). A non-admin who navigates
+// straight to the URL is bounced to their own landing page instead.
+function AdminOnly({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    if (!loading && user && user.role !== "admin") {
+      setLocation(homePathForRole(user.role));
+    }
+  }, [loading, user, setLocation]);
+  if (loading) return <DashboardLayoutSkeleton />;
+  if (!user || user.role !== "admin") return null;
+  return <>{children}</>;
+}
+
 // A single DashboardLayout instance wraps every authenticated route so the
 // sidebar is never remounted on navigation (preserves its scroll position) and
 // no page can forget to render the shell.
@@ -63,7 +82,7 @@ function AppRouter() {
   return (
     <DashboardLayout>
       <Switch>
-        <Route path="/dashboard" component={Dashboard} />
+        <Route path="/dashboard"><AdminOnly><Dashboard /></AdminOnly></Route>
         <Route path="/leads" component={Leads} />
         <Route path="/contacts" component={Contacts} />
         <Route path="/accounts" component={Accounts} />
@@ -78,7 +97,7 @@ function AppRouter() {
         <Route path="/suppliers" component={Suppliers} />
         <Route path="/bom-packages" component={BomPackages} />
         <Route path="/quotations" component={Quotations} />
-        <Route path="/analytics" component={Analytics} />
+        <Route path="/analytics"><AdminOnly><Analytics /></AdminOnly></Route>
         <Route path="/users" component={UserManagement} />
         <Route path="/projects" component={Projects} />
         <Route path="/projects/:id" component={ProjectDetail} />

@@ -45,7 +45,7 @@ export default function Login() {
           try { sessionStorage.setItem("app-session-token", data.token); } catch {}
         }
         toast.success("Login successful");
-        window.location.href = "/dashboard";
+        window.location.href = "/";
       }
     } catch (err) {
       toast.error("Login failed. Please try again.");
@@ -106,7 +106,7 @@ export default function Login() {
         try { sessionStorage.setItem("app-session-token", data.token); } catch {}
       }
       toast.success("Login successful");
-      window.location.href = "/dashboard";
+      window.location.href = "/";
     } catch (err) {
       toast.error("Verification failed. Please try again.");
     } finally {
