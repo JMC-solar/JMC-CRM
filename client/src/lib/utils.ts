@@ -14,3 +14,13 @@ export function formatPHP(value: string | number | null | undefined, showDash = 
   if (showDash && (value === null || value === undefined || num === 0)) return "-";
   return `\u20B1${num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
+
+/**
+ * The first page a user should land on after login. Dashboard/Analytics are
+ * admin-only, so non-admins go to a page they can actually use.
+ */
+export function homePathForRole(role?: string | null): string {
+  if (role === "admin") return "/dashboard";
+  if (["purchaser", "staff", "sales_rep"].includes(role || "")) return "/inventory";
+  return "/projects"; // subadmin (and any other non-admin) \u2014 Project Monitoring
+}
