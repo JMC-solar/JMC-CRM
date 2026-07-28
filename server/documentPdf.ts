@@ -10,6 +10,7 @@ import type {
   ProjectPayment,
   NetMeteringPayment,
   NetMetering,
+  ProjectBilling,
 } from "./models";
 import { requireAuth } from "./_core/requireAuth";
 
@@ -51,6 +52,9 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
     let allPayments: (ProjectPayment | NetMeteringPayment)[] = [];
     let totalProjectAmount: number = 0;
     let nmData: NetMetering | null = null;
+    // If a Project Billing has been saved, it is the source of truth for the
+    // amount owed (contract + quotation + add-ons) and its lines are shown.
+    let billingItems: { description: string; quantity: number; unitPrice: number; amount: number }[] = [];
 
     if (ack.type === "project_payment") {
       // referenceId is the project_payment id (NOT the project id). Resolve the
@@ -75,6 +79,22 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
 
         // All payments for the project this payment belongs to.
         allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", payment.projectId]] });
+
+        // Saved Project Billing wins as the amount owed; else the project's own
+        // amount; else (nothing set) the linked quotation total takes over.
+        const billings = await listAll<ProjectBilling>("project_billings", { where: [["projectId", "==", payment.projectId]] });
+        const projBilling = billings[0];
+        if (projBilling && Number(projBilling.total) > 0) {
+          totalProjectAmount = Number(projBilling.total);
+          billingItems = (projBilling.items || []).map((it: any) => {
+            const amount = Number(it.amount || 0);
+            const quantity = it.quantity != null ? Number(it.quantity) : 1;
+            const unitPrice = it.unitPrice != null ? Number(it.unitPrice) : amount;
+            return { description: it.description, quantity, unitPrice, amount };
+          });
+        } else if (totalProjectAmount === 0 && quotationData?.totalAmount) {
+          totalProjectAmount = Number(quotationData.totalAmount || 0);
+        }
       }
     } else if (ack.type === "net_metering_payment") {
       // referenceId is the netMeteringPayment ID - find the NM record
@@ -120,6 +140,7 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
       allPayments,
       totalProjectAmount,
       nmData,
+      billingItems,
     });
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Content-Disposition", `inline; filename="acknowledgement-${ack.receiptNumber}.html"`);
@@ -344,8 +365,15 @@ function generateAcknowledgementHtml(ack: any, context: {
   allPayments: any[];
   totalProjectAmount: number;
   nmData: any;
+  billingItems?: { description: string; quantity: number; unitPrice: number; amount: number }[];
 }) {
   const { projectData, quotationData, quotationItemsData, allPayments, totalProjectAmount, nmData } = context;
+  // Prefer the saved Project Billing lines (they sum to the amount owed);
+  // otherwise fall back to the linked quotation's items.
+  const useBilling = !!(context.billingItems && context.billingItems.length > 0);
+  const breakdown: any[] = useBilling
+    ? context.billingItems!.map((it) => ({ description: it.description, quantity: it.quantity, unitPrice: String(it.unitPrice), totalPrice: String(it.amount), itemType: "inventory" }))
+    : quotationItemsData;
 
   const typeLabel = ack.type === "quotation" 
     ? "Quotation Acknowledgement" 
@@ -370,8 +398,8 @@ function generateAcknowledgementHtml(ack: any, context: {
   const laborItems = quotationItemsData.filter(i => i.itemType === "labor");
   const customItems = quotationItemsData.filter(i => i.itemType === "custom");
 
-  const itemRows = quotationItemsData.map((item, i) => {
-    const typeTag = item.itemType === "labor" ? '<span style="color: #7c3aed; font-size: 9px; font-weight: 600;">[LABOR]</span> ' 
+  const itemRows = breakdown.map((item, i) => {
+    const typeTag = item.itemType === "labor" ? '<span style="color: #7c3aed; font-size: 9px; font-weight: 600;">[LABOR]</span> '
       : item.itemType === "custom" ? '<span style="color: #d97706; font-size: 9px; font-weight: 600;">[MISC]</span> ' 
       : '';
     return `
@@ -531,8 +559,8 @@ function generateAcknowledgementHtml(ack: any, context: {
         <div class="fin-item balance"><div class="fin-label">Balance Remaining</div><div class="fin-value">${formatPHP(balance)}</div></div>
       </div>` : ""}
 
-      <!-- Itemized Breakdown (if quotation items exist) -->
-      ${quotationItemsData.length > 0 ? `
+      <!-- Itemized Breakdown: the project billing lines, or the linked quotation -->
+      ${breakdown.length > 0 ? `
       <div class="section-title">Itemized Breakdown</div>
       <table>
         <thead>
@@ -546,6 +574,11 @@ function generateAcknowledgementHtml(ack: any, context: {
         </thead>
         <tbody>
           ${itemRows}
+          ${useBilling ? `
+          <tr class="table-footer">
+            <td colspan="4" style="text-align: right;"><strong>Total Billed:</strong></td>
+            <td style="text-align: right;"><strong>${formatPHP(totalProjectAmount)}</strong></td>
+          </tr>` : `
           <tr class="table-footer">
             <td colspan="4" style="text-align: right;"><strong>Subtotal:</strong></td>
             <td style="text-align: right;"><strong>${formatPHP(quotationData?.subtotal || quotationItemsData.reduce((s, i) => s + Number(i.totalPrice || 0), 0))}</strong></td>
@@ -563,7 +596,7 @@ function generateAcknowledgementHtml(ack: any, context: {
           <tr class="table-footer">
             <td colspan="4" style="text-align: right;"><strong>Quotation Total:</strong></td>
             <td style="text-align: right;"><strong>${formatPHP(quotationData?.totalAmount || quotationItemsData.reduce((s, i) => s + Number(i.totalPrice || 0), 0))}</strong></td>
-          </tr>
+          </tr>`}
         </tbody>
       </table>` : ""}
 
