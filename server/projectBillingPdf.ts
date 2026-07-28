@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getById, listAll } from "./firestore";
-import type { Project, ProjectBilling, ProjectPayment } from "./models";
+import type { Project, ProjectBilling, ProjectPayment, QuotationItem } from "./models";
 import { requireAuth } from "./_core/requireAuth";
 
 const router = Router();
@@ -21,23 +21,40 @@ const fmtShort = (d: any) =>
 async function load(projectId: number) {
   const project = await getById<Project>("projects", projectId);
   if (!project) return null;
-  const [billings, payments] = await Promise.all([
+  const [billings, payments, quotationItems] = await Promise.all([
     listAll<ProjectBilling>("project_billings", { where: [["projectId", "==", projectId]] }),
     listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", projectId]] }),
+    project.quotationId
+      ? listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", project.quotationId]] })
+      : Promise.resolve([] as QuotationItem[]),
   ]);
   const billing = billings[0] || null;
   payments.sort((a, b) => new Date(a.paymentDate).getTime() - new Date(b.paymentDate).getTime());
-  // Billed total = the saved billing if there is one, else the project's contract amount.
-  // Normalise old rows (description + amount only) to qty 1 / unit price = amount.
-  const items: { description: string; sku: string | null; quantity: number; unitPrice: number; amount: number }[] =
-    billing?.items?.length
-      ? billing.items.map((it: any) => {
-          const amount = Number(it.amount || 0);
-          const quantity = it.quantity != null ? Number(it.quantity) : 1;
-          const unitPrice = it.unitPrice != null ? Number(it.unitPrice) : amount;
-          return { description: it.description, sku: it.sku ?? null, quantity, unitPrice, amount };
-        })
-      : [{ description: "Project contract amount", sku: null, quantity: 1, unitPrice: Number(project.totalProjectAmount || 0), amount: Number(project.totalProjectAmount || 0) }];
+
+  type Line = { description: string; sku: string | null; quantity: number; unitPrice: number; amount: number };
+  let items: Line[];
+  if (billing?.items?.length) {
+    // Saved billing is the source of truth. Normalise old rows (description +
+    // amount only) to qty 1 / unit price = amount.
+    items = billing.items.map((it: any) => {
+      const amount = Number(it.amount || 0);
+      const quantity = it.quantity != null ? Number(it.quantity) : 1;
+      const unitPrice = it.unitPrice != null ? Number(it.unitPrice) : amount;
+      return { description: it.description, sku: it.sku ?? null, quantity, unitPrice, amount };
+    });
+  } else {
+    // No saved billing yet: contract amount (if any) + linked quotation items.
+    // If there's no contract amount, the quotation lines are the whole bill.
+    const contract = Number(project.totalProjectAmount || 0);
+    items = [];
+    if (contract > 0) items.push({ description: "Project contract amount", sku: null, quantity: 1, unitPrice: contract, amount: contract });
+    for (const q of quotationItems) {
+      const qty = Number(q.quantity || 1);
+      const up = Number(q.unitPrice || 0);
+      items.push({ description: q.description, sku: null, quantity: qty, unitPrice: up, amount: Number(q.totalPrice || qty * up) });
+    }
+    if (items.length === 0) items.push({ description: "Project contract amount", sku: null, quantity: 1, unitPrice: contract, amount: contract });
+  }
   const total = items.reduce((s, it) => s + it.amount, 0);
   const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   return { project, billing, payments, items, total, totalPaid, balance: total - totalPaid };

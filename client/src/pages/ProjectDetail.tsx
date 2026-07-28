@@ -466,6 +466,22 @@ function PaymentsSection({ projectId }: { projectId: number }) {
   const [itemPickerOpen, setItemPickerOpen] = useState(false);
   const { data: billing } = trpc.projectBillings.get.useQuery({ projectId });
   const { data: inventoryList } = trpc.inventory.listAll.useQuery();
+  // The project (for its linked quotation) and that quotation's line items.
+  const { data: project } = trpc.projects.getById.useQuery({ id: projectId });
+  const { data: quotationItems } = trpc.quotations.getItems.useQuery(
+    { quotationId: project?.quotationId ?? 0 },
+    { enabled: !!project?.quotationId }
+  );
+
+  // Linked quotation's items mapped to editable billing rows.
+  const quotationRows = (): BillRow[] =>
+    (quotationItems ?? []).map((it: any) => ({
+      description: it.description ?? "",
+      inventoryItemId: it.itemType === "inventory" ? (it.itemId ?? null) : null,
+      sku: null,
+      quantity: String(it.quantity ?? 1),
+      unitPrice: String(it.unitPrice ?? ""),
+    }));
 
   const saveBillingMutation = trpc.projectBillings.save.useMutation({
     onSuccess: (data: any) => { toast.success(`Billing ${data.billingNumber} saved`); utils.projectBillings.get.invalidate({ projectId }); },
@@ -487,8 +503,16 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       })));
       setBillNotes(billing.notes ?? "");
     } else {
+      // No saved billing yet: seed the contract amount (if any) plus every line
+      // item from the linked quotation. If there's no contract amount, the
+      // quotation lines become the whole billing ("quotation takes over").
       const contract = Number(summary?.totalProjectAmount || 0);
-      setBillRows([{ description: "Project contract amount", inventoryItemId: null, sku: null, quantity: "1", unitPrice: contract ? String(contract) : "" }]);
+      const rows: BillRow[] = [];
+      if (contract > 0) {
+        rows.push({ description: "Project contract amount", inventoryItemId: null, sku: null, quantity: "1", unitPrice: String(contract) });
+      }
+      rows.push(...quotationRows());
+      setBillRows(rows.length ? rows : [emptyBillRow()]);
       setBillNotes("");
     }
     setIsBillingOpen(true);
@@ -503,6 +527,17 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       unitPrice: item.sellingPrice != null ? String(item.sellingPrice) : "",
     }]);
     setItemPickerOpen(false);
+  };
+
+  // Append the linked quotation's items to the current rows (manual re-pull).
+  const pullQuotation = () => {
+    const rows = quotationRows();
+    if (rows.length === 0) { toast.error("No linked quotation, or it has no items."); return; }
+    setBillRows((prev) => {
+      const kept = prev.filter((r) => r.description.trim() || r.unitPrice);
+      return [...kept, ...rows];
+    });
+    toast.success(`Added ${rows.length} item(s) from the linked quotation`);
   };
 
   const billTotal = billRows.reduce((s, r) => s + rowTotal(r), 0);
@@ -788,6 +823,11 @@ function PaymentsSection({ projectId }: { projectId: number }) {
                 <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setBillRows([...billRows, emptyBillRow()])}>
                   <Plus className="h-4 w-4 mr-1" /> Add manual
                 </Button>
+                {project?.quotationId && (
+                  <Button type="button" variant="outline" size="sm" className="border-border" onClick={pullQuotation}>
+                    <FileText className="h-4 w-4 mr-1" /> Pull from quotation
+                  </Button>
+                )}
               </div>
               <div className="text-right">
                 <span className="text-xs text-muted-foreground mr-2">Total Billed</span>
