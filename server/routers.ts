@@ -60,6 +60,7 @@ import type {
   CashRequestItem,
   Notification,
   RetailSale,
+  RetailRemittance,
   RetailSaleItem,
 } from "./models";
 import { money } from "./models";
@@ -954,12 +955,14 @@ export const appRouter = router({
         throw new Error("Only Admin or Sub Admin can view retail sales");
       }
       const { search, page = 1, limit = 20 } = input || {};
-      const [allSales, contacts, allLineItems] = await Promise.all([
+      const [allSales, contacts, allLineItems, allRemittances] = await Promise.all([
         fsListAll<RetailSale>("retail_sales"),
         fsListAll<Contact>("contacts"),
         fsListAll<RetailSaleItem>("retail_sale_items"),
+        fsListAll<RetailRemittance>("retail_remittances"),
       ]);
       const contactMap = new Map(contacts.map(c => [c.id, c]));
+      const remittanceBySale = new Map(allRemittances.map(r => [r.retailSaleId, r]));
       // Counted here so the list page doesn't have to fire a retail.get per row just
       // to show how many items a sale had.
       const itemCountBySale = new Map<number, number>();
@@ -977,12 +980,30 @@ export const appRouter = router({
       const start = (page - 1) * limit;
       const pageItems = items.slice(start, start + limit);
       return {
-        items: pageItems.map(sale => ({
-          ...sale,
-          customerName: nameFor(sale.contactId, contactMap, personName) ?? sale.customerName,
-          itemCount: itemCountBySale.get(sale.id) ?? 0,
-        })),
+        items: pageItems.map(sale => {
+          const rem = remittanceBySale.get(sale.id) ?? null;
+          return {
+            ...sale,
+            customerName: nameFor(sale.contactId, contactMap, personName) ?? sale.customerName,
+            itemCount: itemCountBySale.get(sale.id) ?? 0,
+            // Status for the badge: none / not_deposited / pending_approval / approved.
+            remittanceStatus: !rem ? "none" : rem.approved ? "approved" : rem.deposited ? "pending_approval" : "not_deposited",
+            remittanceAmount: rem ? rem.amount : null,
+            remittanceDeposited: rem ? rem.deposited : false,
+            remittanceApproved: rem ? rem.approved : false,
+          };
+        }),
         total, page, limit, totalPages,
+        // Company-wide summary. Only ADMIN-APPROVED deposits count as deposited,
+        // so a self-claimed (unverified) deposit still shows as not-yet-deposited.
+        summary: {
+          totalSales: money(allSales.reduce((s, x) => s + Number(x.totalAmount || 0), 0)),
+          totalDeposited: money(allRemittances.filter(r => r.approved).reduce((s, r) => s + Number(r.amount || 0), 0)),
+          undeposited: money(
+            allSales.reduce((s, x) => s + Number(x.totalAmount || 0), 0) -
+            allRemittances.filter(r => r.approved).reduce((s, r) => s + Number(r.amount || 0), 0)
+          ),
+        },
       };
     }),
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input, ctx }) => {
@@ -1249,6 +1270,71 @@ export const appRouter = router({
   }),
 
   // ============ PURCHASE ORDERS ============
+  // ============ RETAIL PAYMENT REMITTANCE ============
+  // Audit trail for retail collections: how paid, and whether/where deposited.
+  retailRemittances: router({
+    get: protectedProcedure.input(z.object({ retailSaleId: z.number() })).query(async ({ ctx, input }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) throw new Error("Only Admin or Sub Admin can view retail remittances");
+      const rows = await fsListAll<RetailRemittance>("retail_remittances", { where: [["retailSaleId", "==", input.retailSaleId]] });
+      return rows[0] ?? null;
+    }),
+    save: protectedProcedure.input(z.object({
+      retailSaleId: z.number(),
+      paymentMethod: z.string().optional(),
+      amount: z.number().nonnegative(),
+      deposited: z.boolean(),
+      depositAccount: z.string().optional(),
+      depositDate: z.string().optional(),
+      reference: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ ctx, input }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) throw new Error("Only Admin or Sub Admin can record retail remittances");
+      const existing = await fsListAll<RetailRemittance>("retail_remittances", { where: [["retailSaleId", "==", input.retailSaleId]] });
+      const fields = {
+        retailSaleId: input.retailSaleId,
+        paymentMethod: input.paymentMethod ?? null,
+        amount: money(input.amount),
+        deposited: input.deposited,
+        depositAccount: input.depositAccount ?? null,
+        depositDate: input.depositDate ? new Date(input.depositDate) : null,
+        reference: input.reference ?? null,
+        notes: input.notes ?? null,
+        // Any edit clears admin approval — the change must be re-verified.
+        approved: false,
+        approvedBy: null,
+        approvedByName: null,
+        approvedAt: null,
+      };
+      const summary = `retail sale #${input.retailSaleId}: ${money(input.amount)}, ${input.deposited ? `deposited to ${input.depositAccount ?? "?"}` : "not deposited"}`;
+      if (existing[0]) {
+        await fsUpdateOne("retail_remittances", existing[0].id, fields);
+        await fsAudit(ctx.user.id, ctx.user.name, "update", "retail_remittance", existing[0].id, `Updated remittance for ${summary}`);
+        return { success: true, id: existing[0].id };
+      }
+      const id = await fsInsertOne("retail_remittances", {
+        ...fields,
+        recordedBy: ctx.user.id,
+        recordedByName: ctx.user.name || "Unknown",
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "retail_remittance", id, `Recorded remittance for ${summary}`);
+      return { success: true, id };
+    }),
+
+    // Admin-only: verify (or un-verify) that a claimed deposit is genuine.
+    setApproval: adminProcedure.input(z.object({ retailSaleId: z.number(), approved: z.boolean() })).mutation(async ({ ctx, input }) => {
+      const rows = await fsListAll<RetailRemittance>("retail_remittances", { where: [["retailSaleId", "==", input.retailSaleId]] });
+      const rem = rows[0];
+      if (!rem) throw new Error("No remittance recorded for this sale yet");
+      if (input.approved && !rem.deposited) throw new Error("Can't approve a deposit that hasn't been marked deposited");
+      const now = new Date();
+      await fsUpdateOne("retail_remittances", rem.id, input.approved
+        ? { approved: true, approvedBy: ctx.user.id, approvedByName: ctx.user.name || "Admin", approvedAt: now }
+        : { approved: false, approvedBy: null, approvedByName: null, approvedAt: null });
+      await fsAudit(ctx.user.id, ctx.user.name, input.approved ? "approve" : "reject", "retail_remittance", rem.id, `${input.approved ? "Approved" : "Un-approved"} deposit for retail sale #${input.retailSaleId} (${money(Number(rem.amount))})`);
+      return { success: true };
+    }),
+  }),
+
   purchaseOrders: router({
     list: protectedProcedure.input(z.object({
       search: z.string().optional(),

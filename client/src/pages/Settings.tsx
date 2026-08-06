@@ -91,6 +91,7 @@ export default function Settings() {
           <TabsTrigger value="vat_rates">VAT Rates</TabsTrigger>
           <TabsTrigger value="payment_methods">Payment Methods</TabsTrigger>
           <TabsTrigger value="cash_request_purposes">Cash Request Purposes</TabsTrigger>
+          <TabsTrigger value="deposit_accounts">Deposit Accounts</TabsTrigger>
         </TabsList>
 
         <TabsContent value="units" className="mt-4">
@@ -156,6 +157,13 @@ export default function Settings() {
             category="cash_request_purpose"
             title="Cash Request Purposes"
             description="Define the available reasons for cash requests (e.g., Truck Gasoline, Office Supplies, Site Materials)."
+          />
+        </TabsContent>
+        <TabsContent value="deposit_accounts" className="mt-4">
+          <OptionManager
+            category="deposit_account"
+            title="Deposit Accounts"
+            description="Define the bank/cash accounts where retail collections are deposited (e.g., BDO – Main, BPI Savings, Company Cash Vault). Used by retail payment remittances."
           />
         </TabsContent>
       </Tabs>
