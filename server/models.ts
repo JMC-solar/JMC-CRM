@@ -749,6 +749,25 @@ export interface RetailSale {
   updatedAt: Date;
 }
 
+// ============ RETAIL PAYMENT REMITTANCE ============
+// One remittance record per retail sale: how the customer paid, and whether/where
+// the collected money was deposited — an audit trail from collection to deposit.
+export interface RetailRemittance {
+  id: number;
+  retailSaleId: number;
+  paymentMethod: string | null; // how the customer paid (from payment_method config)
+  amount: string;               // amount remitted (defaults to the sale total)
+  deposited: boolean;
+  depositAccount: string | null; // where it was deposited (from deposit_account config)
+  depositDate: Date | null;
+  reference: string | null;      // deposit slip / reference number
+  notes: string | null;
+  recordedBy: number | null;
+  recordedByName: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ============ RETAIL SALE LINE ITEMS ============
 export interface RetailSaleItem {
   id: number;

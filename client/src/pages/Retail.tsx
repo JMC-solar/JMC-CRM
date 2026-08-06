@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
-import { Plus, Search, Edit, Trash2, Info, Printer } from "lucide-react";
+import { Plus, Search, Edit, Trash2, Info, Printer, Wallet } from "lucide-react";
 import DetailDialog from "@/components/DetailDialog";
 import ContactCombobox, { ContactOption } from "@/components/ContactCombobox";
 import PaginationControls from "@/components/PaginationControls";
@@ -326,6 +326,141 @@ function EditRetailSaleDialog({ saleId, open, onOpenChange }: { saleId: number; 
   );
 }
 
+// ============ PAYMENT REMITTANCE DIALOG ============
+function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boolean; onOpenChange: (o: boolean) => void }) {
+  const utils = trpc.useUtils();
+  const saleId = sale?.id ?? 0;
+  const { data: existing } = trpc.retailRemittances.get.useQuery({ retailSaleId: saleId }, { enabled: open && !!saleId });
+  const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
+  const { data: depositAccounts } = trpc.config.getOptions.useQuery({ category: "deposit_account" });
+
+  const [paymentMethod, setPaymentMethod] = useState("");
+  const [amount, setAmount] = useState("");
+  const [deposited, setDeposited] = useState(false);
+  const [depositAccount, setDepositAccount] = useState("");
+  const [depositDate, setDepositDate] = useState("");
+  const [reference, setReference] = useState("");
+  const [notes, setNotes] = useState("");
+
+  // Populate when opening / when the existing remittance loads.
+  useEffect(() => {
+    if (!open) return;
+    if (existing) {
+      setPaymentMethod(existing.paymentMethod ?? "");
+      setAmount(String(existing.amount ?? ""));
+      setDeposited(!!existing.deposited);
+      setDepositAccount(existing.depositAccount ?? "");
+      setDepositDate(existing.depositDate ? new Date(existing.depositDate).toISOString().slice(0, 10) : "");
+      setReference(existing.reference ?? "");
+      setNotes(existing.notes ?? "");
+    } else {
+      setPaymentMethod("");
+      setAmount(sale?.totalAmount != null ? String(sale.totalAmount) : "");
+      setDeposited(false);
+      setDepositAccount("");
+      setDepositDate("");
+      setReference("");
+      setNotes("");
+    }
+  }, [open, existing, sale]);
+
+  const saveMutation = trpc.retailRemittances.save.useMutation({
+    onSuccess: () => {
+      toast.success("Remittance saved");
+      utils.retailRemittances.get.invalidate({ retailSaleId: saleId });
+      utils.retail.list.invalidate();
+      onOpenChange(false);
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const handleSave = () => {
+    const amt = parseFloat(amount);
+    if (isNaN(amt) || amt < 0) { toast.error("Enter a valid amount"); return; }
+    if (deposited && !depositAccount) { toast.error("Select where it was deposited"); return; }
+    saveMutation.mutate({
+      retailSaleId: saleId,
+      paymentMethod: paymentMethod || undefined,
+      amount: amt,
+      deposited,
+      depositAccount: depositAccount || undefined,
+      depositDate: depositDate || undefined,
+      reference: reference || undefined,
+      notes: notes || undefined,
+    });
+  };
+
+  const selCls = "w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground";
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md bg-card border-border max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="text-foreground">Payment Remittance — {sale?.customerName || `Sale #${saleId}`}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <Label>Payment Type</Label>
+            <select className={selCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
+              <option value="">-- How did the customer pay? --</option>
+              {paymentMethods?.map((o: any) => <option key={o.id} value={o.value}>{o.value}</option>)}
+            </select>
+          </div>
+          <div>
+            <Label>Amount (₱)</Label>
+            <Input type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} className="bg-input border-border" />
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={deposited} onChange={(e) => setDeposited(e.target.checked)} className="h-4 w-4 accent-primary" />
+            <span className="text-sm text-foreground">Amount has been deposited</span>
+          </label>
+          {deposited && (
+            <>
+              <div>
+                <Label>Deposited To</Label>
+                <select className={selCls} value={depositAccount} onChange={(e) => setDepositAccount(e.target.value)}>
+                  <option value="">-- Select account --</option>
+                  {depositAccounts?.map((o: any) => <option key={o.id} value={o.value}>{o.value}</option>)}
+                </select>
+                {(!depositAccounts || depositAccounts.length === 0) && (
+                  <p className="text-xs text-muted-foreground mt-1">No deposit accounts yet — add them in Settings → Deposit Accounts.</p>
+                )}
+              </div>
+              <div>
+                <Label>Deposit Date</Label>
+                <Input type="date" value={depositDate} onChange={(e) => setDepositDate(e.target.value)} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label>Reference / Slip No.</Label>
+                <Input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Deposit slip number" className="bg-input border-border" />
+              </div>
+            </>
+          )}
+          <div>
+            <Label>Notes</Label>
+            <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} className="bg-input border-border" placeholder="Optional" />
+          </div>
+          {existing?.recordedByName && (
+            <p className="text-xs text-muted-foreground">
+              Last recorded by {existing.recordedByName}
+              {existing.updatedAt ? ` · ${new Date(existing.updatedAt).toLocaleDateString()}` : ""}
+            </p>
+          )}
+          <Button className="w-full bg-primary text-primary-foreground" onClick={handleSave} disabled={saveMutation.isPending}>
+            {saveMutation.isPending ? "Saving..." : "Save Remittance"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const remittanceBadge = (status: string) => {
+  if (status === "deposited") return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Deposited</Badge>;
+  if (status === "pending") return <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">Not deposited</Badge>;
+  return <Badge variant="outline" className="text-muted-foreground">No remittance</Badge>;
+};
+
 // ============ MAIN RETAIL PAGE ============
 export default function Retail() {
   const [search, setSearch] = useState("");
@@ -333,6 +468,7 @@ export default function Retail() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingSaleId, setEditingSaleId] = useState<number | null>(null);
   const [viewingSale, setViewingSale] = useState<any>(null);
+  const [remittanceSale, setRemittanceSale] = useState<any>(null);
   const utils = trpc.useUtils();
 
   const { data, isLoading } = trpc.retail.list.useQuery({ search, page, limit: 20 });
@@ -383,6 +519,28 @@ export default function Retail() {
 
       <CreateRetailSaleDialog open={isCreateOpen} onOpenChange={setIsCreateOpen} />
 
+      {/* Remittance summary — undeposited collections at a glance */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Total Retail Sales</p>
+            <p className="text-xl font-bold text-foreground">{formatPHP(data?.summary?.totalSales ?? 0)}</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Deposited</p>
+            <p className="text-xl font-bold text-green-400">{formatPHP(data?.summary?.totalDeposited ?? 0)}</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-card border-border">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Not Yet Deposited</p>
+            <p className="text-xl font-bold text-red-400">{formatPHP(data?.summary?.undeposited ?? 0)}</p>
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input placeholder="Search by customer name..." value={search} onChange={(e) => handleSearchChange(e.target.value)} className="pl-10 bg-input border-border" />
@@ -398,14 +556,15 @@ export default function Retail() {
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Sale Date</th>
                   <th className="text-center p-4 text-sm font-medium text-muted-foreground">Items</th>
                   <th className="text-right p-4 text-sm font-medium text-muted-foreground">Total</th>
+                  <th className="text-left p-4 text-sm font-medium text-muted-foreground">Remittance</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {isLoading ? (
-                  <tr><td colSpan={5} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
+                  <tr><td colSpan={6} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : !sales || sales.length === 0 ? (
-                  <tr><td colSpan={5} className="p-8 text-center text-muted-foreground">No retail sales recorded yet.</td></tr>
+                  <tr><td colSpan={6} className="p-8 text-center text-muted-foreground">No retail sales recorded yet.</td></tr>
                 ) : (
                   sales.map((sale: any, idx: number) => (
                     <tr
@@ -417,9 +576,11 @@ export default function Retail() {
                       <td className="p-4 text-sm text-muted-foreground">{new Date(sale.saleDate).toLocaleDateString()}</td>
                       <td className="p-4 text-sm text-center text-muted-foreground">{sale.itemCount}</td>
                       <td className="p-4 text-sm text-right font-medium text-foreground">{formatPHP(sale.totalAmount)}</td>
+                      <td className="p-4">{remittanceBadge(sale.remittanceStatus)}</td>
                       <td className="p-4">
                         {/* Stop row-level view clicks from firing behind the action buttons */}
                         <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                          <Button variant="ghost" size="sm" title="Payment Remittance" onClick={() => setRemittanceSale(sale)}><Wallet className="h-4 w-4 text-primary" /></Button>
                           <Button variant="ghost" size="sm" title="Edit" onClick={() => setEditingSaleId(sale.id)}><Edit className="h-4 w-4" /></Button>
                           <Button variant="ghost" size="sm" title="Delete" onClick={() => handleDelete(sale)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
                         </div>
@@ -516,6 +677,8 @@ export default function Retail() {
       {editingSaleId && (
         <EditRetailSaleDialog saleId={editingSaleId} open={!!editingSaleId} onOpenChange={(o) => { if (!o) setEditingSaleId(null); }} />
       )}
+
+      <RemittanceDialog sale={remittanceSale} open={!!remittanceSale} onOpenChange={(o) => { if (!o) setRemittanceSale(null); }} />
     </div>
   );
 }
