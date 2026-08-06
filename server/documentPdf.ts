@@ -11,6 +11,7 @@ import type {
   NetMeteringPayment,
   NetMetering,
   ProjectBilling,
+  NetMeteringBilling,
 } from "./models";
 import { requireAuth } from "./_core/requireAuth";
 
@@ -104,23 +105,29 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
         const nm = await getById<NetMetering>("net_metering", nmPayment.netMeteringId);
         if (nm) {
           nmData = nm;
-          // Get the project if linked
+          // Project (for the customer/project header only) if linked.
           if (nm.projectId) {
             const project = await getById<Project>("projects", nm.projectId);
-            if (project) {
-              projectData = project;
-              totalProjectAmount = Number(project.totalProjectAmount || 0);
-              if (project.quotationId) {
-                const quot = await getById<Quotation>("quotations", project.quotationId);
-                if (quot) {
-                  quotationData = quot;
-                  quotationItemsData = await listAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", quot.id]] });
-                }
-              }
-            }
+            if (project) projectData = project;
           }
           // Get all NM payments for this NM record
           allPayments = await listAll<NetMeteringPayment>("net_metering_payments", { where: [["netMeteringId", "==", nm.id]] });
+
+          // The amount owed is the NET METERING BILLING (what was billed for the
+          // NM service), NOT the project's overall amount. Using the project
+          // amount is what produced nonsense balances like -44,999.
+          const nmBillings = await listAll<NetMeteringBilling>("net_metering_billings", { where: [["netMeteringId", "==", nm.id]] });
+          const nmBilling = nmBillings[0];
+          if (nmBilling && Number(nmBilling.total) > 0) {
+            totalProjectAmount = Number(nmBilling.total);
+            billingItems = (nmBilling.items || []).map((it: any) => {
+              const amount = Number(it.amount || 0);
+              return { description: it.description, quantity: 1, unitPrice: amount, amount };
+            });
+          } else {
+            // No NM billing saved — fall back to the project amount (old behaviour).
+            totalProjectAmount = Number(projectData?.totalProjectAmount || 0);
+          }
         }
       }
     } else if (ack.type === "quotation") {
@@ -368,6 +375,8 @@ function generateAcknowledgementHtml(ack: any, context: {
   billingItems?: { description: string; quantity: number; unitPrice: number; amount: number }[];
 }) {
   const { projectData, quotationData, quotationItemsData, allPayments, totalProjectAmount, nmData } = context;
+  // What the "amount owed" line is called depends on the receipt type.
+  const amountOwedLabel = nmData ? "Net Metering Billed" : "Total Project Amount";
   // Prefer the saved Project Billing lines (they sum to the amount owed);
   // otherwise fall back to the linked quotation's items.
   const useBilling = !!(context.billingItems && context.billingItems.length > 0);
@@ -553,7 +562,7 @@ function generateAcknowledgementHtml(ack: any, context: {
       ${totalProjectAmount > 0 || totalPaid > 0 ? `
       <div class="section-title">Account Summary</div>
       <div class="financial-summary">
-        <div class="fin-item"><div class="fin-label">Total Project Amount</div><div class="fin-value">${formatPHP(totalProjectAmount)}</div></div>
+        <div class="fin-item"><div class="fin-label">${amountOwedLabel}</div><div class="fin-value">${formatPHP(totalProjectAmount)}</div></div>
         <div class="fin-item highlight"><div class="fin-label">Total Paid</div><div class="fin-value">${formatPHP(totalPaid)}</div></div>
         <div class="fin-item"><div class="fin-label">This Payment</div><div class="fin-value">${formatPHP(currentPayment)}</div></div>
         <div class="fin-item balance"><div class="fin-label">Balance Remaining</div><div class="fin-value">${formatPHP(balance)}</div></div>
