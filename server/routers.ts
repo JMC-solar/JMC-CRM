@@ -986,21 +986,22 @@ export const appRouter = router({
             ...sale,
             customerName: nameFor(sale.contactId, contactMap, personName) ?? sale.customerName,
             itemCount: itemCountBySale.get(sale.id) ?? 0,
-            // Remittance status for the badge + summary: none / pending / deposited.
-            remittanceStatus: !rem ? "none" : rem.deposited ? "deposited" : "pending",
+            // Status for the badge: none / not_deposited / pending_approval / approved.
+            remittanceStatus: !rem ? "none" : rem.approved ? "approved" : rem.deposited ? "pending_approval" : "not_deposited",
             remittanceAmount: rem ? rem.amount : null,
             remittanceDeposited: rem ? rem.deposited : false,
+            remittanceApproved: rem ? rem.approved : false,
           };
         }),
         total, page, limit, totalPages,
-        // Company-wide remittance summary (across ALL sales, not just this page)
-        // so undeposited collections are visible at a glance.
+        // Company-wide summary. Only ADMIN-APPROVED deposits count as deposited,
+        // so a self-claimed (unverified) deposit still shows as not-yet-deposited.
         summary: {
           totalSales: money(allSales.reduce((s, x) => s + Number(x.totalAmount || 0), 0)),
-          totalDeposited: money(allRemittances.filter(r => r.deposited).reduce((s, r) => s + Number(r.amount || 0), 0)),
+          totalDeposited: money(allRemittances.filter(r => r.approved).reduce((s, r) => s + Number(r.amount || 0), 0)),
           undeposited: money(
             allSales.reduce((s, x) => s + Number(x.totalAmount || 0), 0) -
-            allRemittances.filter(r => r.deposited).reduce((s, r) => s + Number(r.amount || 0), 0)
+            allRemittances.filter(r => r.approved).reduce((s, r) => s + Number(r.amount || 0), 0)
           ),
         },
       };
@@ -1298,6 +1299,11 @@ export const appRouter = router({
         depositDate: input.depositDate ? new Date(input.depositDate) : null,
         reference: input.reference ?? null,
         notes: input.notes ?? null,
+        // Any edit clears admin approval — the change must be re-verified.
+        approved: false,
+        approvedBy: null,
+        approvedByName: null,
+        approvedAt: null,
       };
       const summary = `retail sale #${input.retailSaleId}: ${money(input.amount)}, ${input.deposited ? `deposited to ${input.depositAccount ?? "?"}` : "not deposited"}`;
       if (existing[0]) {
@@ -1312,6 +1318,20 @@ export const appRouter = router({
       });
       await fsAudit(ctx.user.id, ctx.user.name, "create", "retail_remittance", id, `Recorded remittance for ${summary}`);
       return { success: true, id };
+    }),
+
+    // Admin-only: verify (or un-verify) that a claimed deposit is genuine.
+    setApproval: adminProcedure.input(z.object({ retailSaleId: z.number(), approved: z.boolean() })).mutation(async ({ ctx, input }) => {
+      const rows = await fsListAll<RetailRemittance>("retail_remittances", { where: [["retailSaleId", "==", input.retailSaleId]] });
+      const rem = rows[0];
+      if (!rem) throw new Error("No remittance recorded for this sale yet");
+      if (input.approved && !rem.deposited) throw new Error("Can't approve a deposit that hasn't been marked deposited");
+      const now = new Date();
+      await fsUpdateOne("retail_remittances", rem.id, input.approved
+        ? { approved: true, approvedBy: ctx.user.id, approvedByName: ctx.user.name || "Admin", approvedAt: now }
+        : { approved: false, approvedBy: null, approvedByName: null, approvedAt: null });
+      await fsAudit(ctx.user.id, ctx.user.name, input.approved ? "approve" : "reject", "retail_remittance", rem.id, `${input.approved ? "Approved" : "Un-approved"} deposit for retail sale #${input.retailSaleId} (${money(Number(rem.amount))})`);
+      return { success: true };
     }),
   }),
 

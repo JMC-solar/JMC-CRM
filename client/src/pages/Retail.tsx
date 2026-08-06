@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { confirm } from "@/lib/confirm";
 import { formatPHP } from "@/lib/utils";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 // ============ LINE ITEMS EDITOR ============
 type LineItemRow = { key: string; itemId: number | null; quantity: string };
@@ -333,6 +334,8 @@ function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boole
   const { data: existing } = trpc.retailRemittances.get.useQuery({ retailSaleId: saleId }, { enabled: open && !!saleId });
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
   const { data: depositAccounts } = trpc.config.getOptions.useQuery({ category: "deposit_account" });
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   const [paymentMethod, setPaymentMethod] = useState("");
   const [amount, setAmount] = useState("");
@@ -373,6 +376,14 @@ function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boole
     },
     onError: (err: any) => toast.error(err.message),
   });
+  const approvalMutation = trpc.retailRemittances.setApproval.useMutation({
+    onSuccess: () => {
+      toast.success("Verification updated");
+      utils.retailRemittances.get.invalidate({ retailSaleId: saleId });
+      utils.retail.list.invalidate();
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
 
   const handleSave = () => {
     const amt = parseFloat(amount);
@@ -399,6 +410,36 @@ function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boole
           <DialogTitle className="text-foreground">Payment Remittance — {sale?.customerName || `Sale #${saleId}`}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
+          {/* Admin verification of the claimed deposit */}
+          {existing?.deposited && (
+            <div className={`rounded-md border p-3 ${existing.approved ? "border-green-500/30 bg-green-500/10" : "border-yellow-500/30 bg-yellow-500/10"}`}>
+              {existing.approved ? (
+                <div className="text-sm text-green-400">
+                  ✓ Deposit verified by {existing.approvedByName || "admin"}
+                  {existing.approvedAt ? ` · ${new Date(existing.approvedAt).toLocaleDateString()}` : ""}
+                </div>
+              ) : (
+                <div className="text-sm text-yellow-400">Deposit claimed — awaiting admin verification.</div>
+              )}
+              {isAdmin && (
+                <div className="mt-2 flex gap-2">
+                  {!existing.approved ? (
+                    <Button size="sm" className="bg-green-600 text-white hover:bg-green-700" onClick={() => approvalMutation.mutate({ retailSaleId: saleId, approved: true })} disabled={approvalMutation.isPending}>
+                      Approve Deposit
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="outline" className="border-border" onClick={() => approvalMutation.mutate({ retailSaleId: saleId, approved: false })} disabled={approvalMutation.isPending}>
+                      Un-approve
+                    </Button>
+                  )}
+                </div>
+              )}
+              {!isAdmin && !existing.approved && (
+                <p className="text-xs text-muted-foreground mt-1">Only an admin can verify the deposit.</p>
+              )}
+            </div>
+          )}
+
           <div>
             <Label>Payment Type</Label>
             <select className={selCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}>
@@ -446,6 +487,9 @@ function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boole
               {existing.updatedAt ? ` · ${new Date(existing.updatedAt).toLocaleDateString()}` : ""}
             </p>
           )}
+          {existing?.approved && (
+            <p className="text-xs text-yellow-400">Note: saving changes will clear the admin verification and require re-approval.</p>
+          )}
           <Button className="w-full bg-primary text-primary-foreground" onClick={handleSave} disabled={saveMutation.isPending}>
             {saveMutation.isPending ? "Saving..." : "Save Remittance"}
           </Button>
@@ -456,8 +500,9 @@ function RemittanceDialog({ sale, open, onOpenChange }: { sale: any; open: boole
 }
 
 const remittanceBadge = (status: string) => {
-  if (status === "deposited") return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Deposited</Badge>;
-  if (status === "pending") return <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">Not deposited</Badge>;
+  if (status === "approved") return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Verified</Badge>;
+  if (status === "pending_approval") return <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">Pending approval</Badge>;
+  if (status === "not_deposited") return <Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30">Not deposited</Badge>;
   return <Badge variant="outline" className="text-muted-foreground">No remittance</Badge>;
 };
 
@@ -529,7 +574,7 @@ export default function Retail() {
         </Card>
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Deposited</p>
+            <p className="text-xs text-muted-foreground">Deposited (verified)</p>
             <p className="text-xl font-bold text-green-400">{formatPHP(data?.summary?.totalDeposited ?? 0)}</p>
           </CardContent>
         </Card>

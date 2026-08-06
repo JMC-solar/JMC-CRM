@@ -757,11 +757,17 @@ export interface RetailRemittance {
   retailSaleId: number;
   paymentMethod: string | null; // how the customer paid (from payment_method config)
   amount: string;               // amount remitted (defaults to the sale total)
-  deposited: boolean;
+  deposited: boolean;            // claimed deposited by whoever recorded it
   depositAccount: string | null; // where it was deposited (from deposit_account config)
   depositDate: Date | null;
   reference: string | null;      // deposit slip / reference number
   notes: string | null;
+  // Admin verification: only an admin can confirm the deposit is genuine.
+  // Any edit to the remittance clears approval so it must be re-verified.
+  approved: boolean;
+  approvedBy: number | null;
+  approvedByName: string | null;
+  approvedAt: Date | null;
   recordedBy: number | null;
   recordedByName: string | null;
   createdAt: Date;
