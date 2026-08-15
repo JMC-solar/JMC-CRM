@@ -8,10 +8,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { trpc } from "@/lib/trpc";
-import { ArrowLeft, Package, CreditCard, Truck, Plus, Printer, Download } from "lucide-react";
+import { ArrowLeft, Package, CreditCard, Truck, Plus, Printer, Download, Pencil, Trash2, Check, X, Clock } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useLocation, useParams } from "wouter";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { confirm } from "@/lib/confirm";
 
 const deliveryStatusColors: Record<string, string> = {
   not_delivered: "bg-gray-500/20 text-gray-400 border-gray-500/30",
@@ -87,10 +89,73 @@ export default function PurchaseOrderDetail() {
   const [paymentMethod, setPaymentMethod] = useState("");
   const [statusDate, setStatusDate] = useState<DateParts>(todayParts());
   const [deliveryDate, setDeliveryDate] = useState<DateParts>(todayParts());
+  // Editing / deleting a payment (admins act directly; others submit a request).
+  const [editingPayment, setEditingPayment] = useState<any>(null);
+  const [editMethod, setEditMethod] = useState("");
   const utils = trpc.useUtils();
+
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   const { data: po, isLoading } = trpc.purchaseOrders.get.useQuery({ id: poId }, { enabled: poId > 0 });
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
+
+  const refreshPo = () => utils.purchaseOrders.get.invalidate({ id: poId });
+  const updatePaymentMutation = trpc.purchaseOrders.updatePayment.useMutation({
+    onSuccess: () => { toast.success("Payment updated"); refreshPo(); setEditingPayment(null); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const deletePaymentMutation = trpc.purchaseOrders.deletePayment.useMutation({
+    onSuccess: () => { toast.success("Payment deleted"); refreshPo(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const requestChangeMutation = trpc.purchaseOrders.requestPaymentChange.useMutation({
+    onSuccess: () => { toast.success("Request submitted for admin approval"); refreshPo(); setEditingPayment(null); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const approveChangeMutation = trpc.purchaseOrders.approvePaymentChange.useMutation({
+    onSuccess: () => { toast.success("Request approved"); refreshPo(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const rejectChangeMutation = trpc.purchaseOrders.rejectPaymentChange.useMutation({
+    onSuccess: () => { toast.success("Request rejected"); refreshPo(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  // A payment with a pending request is locked from further edits/requests.
+  const pendingByPayment = new Map<number, any>((po?.paymentRequests ?? []).map((r: any) => [r.paymentId, r]));
+
+  const openEditPayment = (payment: any) => {
+    setEditingPayment(payment);
+    setEditMethod(payment.paymentMethod || "");
+  };
+
+  const handleEditSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const amount = fd.get("amount") as string;
+    const paymentDate = fd.get("paymentDate") as string;
+    const reference = (fd.get("reference") as string) || undefined;
+    const notes = (fd.get("notes") as string) || undefined;
+    const reason = (fd.get("reason") as string) || undefined;
+    if (isAdmin) {
+      updatePaymentMutation.mutate({ paymentId: editingPayment.id, amount, paymentDate, paymentMethod: editMethod || undefined, reference, notes });
+    } else {
+      requestChangeMutation.mutate({ paymentId: editingPayment.id, type: "edit", amount, paymentDate, paymentMethod: editMethod || undefined, reference, notes, reason });
+    }
+  };
+
+  const handleDeletePayment = async (payment: any) => {
+    if (isAdmin) {
+      if (await confirm(`Delete this payment of ₱${Number(payment.amount).toLocaleString()}? The PO totals will be recalculated.`)) {
+        deletePaymentMutation.mutate({ paymentId: payment.id });
+      }
+    } else {
+      const reason = window.prompt("Reason for deleting this payment (sent to admin for approval):") ?? undefined;
+      if (reason === undefined) return; // cancelled
+      requestChangeMutation.mutate({ paymentId: payment.id, type: "delete", reason });
+    }
+  };
 
   const updateMutation = trpc.purchaseOrders.update.useMutation({
     onSuccess: () => { toast.success("PO updated"); utils.purchaseOrders.get.invalidate({ id: poId }); setStatusDialogOpen(false); },
@@ -401,24 +466,38 @@ export default function PurchaseOrderDetail() {
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Method</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Reference</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Notes</th>
+                    <th className="text-right p-4 text-sm font-medium text-muted-foreground">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {po.payments.map((payment: any) => (
+                  {po.payments.map((payment: any) => {
+                    const pending = pendingByPayment.get(payment.id);
+                    return (
                     <tr key={payment.id} className="border-b border-border/50">
                       <td className="p-4 text-sm text-foreground">{new Date(payment.paymentDate).toLocaleDateString()}</td>
                       <td className="p-4 font-medium text-foreground">₱{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.paymentMethod || "-"}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.reference || "-"}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.notes || "-"}</td>
+                      <td className="p-4 text-right">
+                        {pending ? (
+                          <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30"><Clock className="h-3 w-3 mr-1" />{pending.type === "delete" ? "Delete" : "Edit"} pending</Badge>
+                        ) : (
+                          <div className="flex justify-end gap-1">
+                            <Button variant="ghost" size="sm" className="text-primary" title="Edit payment" onClick={() => openEditPayment(payment)}><Pencil className="h-4 w-4" /></Button>
+                            <Button variant="ghost" size="sm" className="text-red-400 hover:text-red-300" title="Delete payment" onClick={() => handleDeletePayment(payment)}><Trash2 className="h-4 w-4" /></Button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-border">
                     <td className="p-4 font-medium text-foreground">Total Paid:</td>
                     <td className="p-4 font-bold text-green-400">₱{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                    <td colSpan={3}></td>
+                    <td colSpan={4}></td>
                   </tr>
                 </tfoot>
               </table>
@@ -426,6 +505,94 @@ export default function PurchaseOrderDetail() {
           )}
         </CardContent>
       </Card>
+
+      {/* Pending change requests (edit/delete) awaiting admin action */}
+      {po.paymentRequests && po.paymentRequests.length > 0 && (
+        <Card className="bg-card border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-foreground flex items-center gap-2"><Clock className="h-5 w-5 text-yellow-400" /> Pending Payment Change Requests</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {po.paymentRequests.map((req: any) => {
+              const target = po.payments.find((p: any) => p.id === req.paymentId);
+              return (
+                <div key={req.id} className="rounded-md border border-border p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="text-sm">
+                      <div className="font-medium text-foreground">
+                        {req.type === "delete" ? "Delete" : "Edit"} payment{target ? ` of ₱${Number(target.amount).toLocaleString()}` : ""}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-0.5">Requested by {req.requestedByName || "Unknown"}</div>
+                      {req.type === "edit" && (
+                        <div className="text-xs text-muted-foreground mt-1">
+                          New: ₱{Number(req.proposedAmount || 0).toLocaleString()}
+                          {req.proposedPaymentDate ? ` · ${new Date(req.proposedPaymentDate).toLocaleDateString()}` : ""}
+                          {req.proposedPaymentMethod ? ` · ${req.proposedPaymentMethod}` : ""}
+                          {req.proposedReference ? ` · ref ${req.proposedReference}` : ""}
+                        </div>
+                      )}
+                      {req.reason && <div className="text-xs text-muted-foreground mt-1">Reason: {req.reason}</div>}
+                    </div>
+                    {isAdmin ? (
+                      <div className="flex gap-2 shrink-0">
+                        <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => approveChangeMutation.mutate({ id: req.id })} disabled={approveChangeMutation.isPending}><Check className="h-4 w-4 mr-1" /> Approve</Button>
+                        <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => { const r = window.prompt("Reason for rejecting (optional):"); if (r === null) return; rejectChangeMutation.mutate({ id: req.id, reason: r || undefined }); }} disabled={rejectChangeMutation.isPending}><X className="h-4 w-4 mr-1" /> Reject</Button>
+                      </div>
+                    ) : (
+                      <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30 shrink-0">Awaiting admin</Badge>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Edit payment (admin saves directly; others submit a request) */}
+      <Dialog open={!!editingPayment} onOpenChange={(o) => { if (!o) setEditingPayment(null); }}>
+        <DialogContent className="bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">{isAdmin ? "Edit Payment" : "Request Payment Edit"}</DialogTitle></DialogHeader>
+          {editingPayment && (
+            <form onSubmit={handleEditSubmit} className="space-y-4">
+              <div>
+                <Label>Amount (₱) *</Label>
+                <Input name="amount" type="number" step="0.01" min="0" required defaultValue={editingPayment.amount} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label>Payment Date *</Label>
+                <Input name="paymentDate" type="date" required defaultValue={new Date(editingPayment.paymentDate).toISOString().split("T")[0]} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label>Payment Method</Label>
+                <Select value={editMethod} onValueChange={setEditMethod}>
+                  <SelectTrigger className="bg-input border-border"><SelectValue placeholder="Select method" /></SelectTrigger>
+                  <SelectContent>
+                    {paymentMethods?.map((m: any) => <SelectItem key={m.id} value={m.value}>{m.value}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Reference</Label>
+                <Input name="reference" defaultValue={editingPayment.reference || ""} className="bg-input border-border" />
+              </div>
+              <div>
+                <Label>Notes</Label>
+                <Textarea name="notes" defaultValue={editingPayment.notes || ""} className="bg-input border-border" />
+              </div>
+              {!isAdmin && (
+                <div>
+                  <Label>Reason for change (for admin)</Label>
+                  <Textarea name="reason" placeholder="Why does this need to change?" className="bg-input border-border" />
+                </div>
+              )}
+              <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updatePaymentMutation.isPending || requestChangeMutation.isPending}>
+                {isAdmin ? "Save Changes" : "Submit Request"}
+              </Button>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Notes */}
       {po.notes && (

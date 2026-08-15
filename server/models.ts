@@ -225,6 +225,31 @@ export interface PoPayment {
   createdAt: Date;
 }
 
+// A sub-admin's request to edit or delete a PO payment; an admin approves it.
+// (Admins edit/delete directly; this is the approval gate for everyone else.)
+export interface PoPaymentRequest {
+  id: number;
+  purchaseOrderId: number;
+  paymentId: number;
+  type: "edit" | "delete";
+  // Proposed new values for an "edit" (all null for a "delete").
+  proposedAmount: string | null;
+  proposedPaymentDate: Date | null;
+  proposedPaymentMethod: string | null;
+  proposedReference: string | null;
+  proposedNotes: string | null;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  requestedBy: number | null;
+  requestedByName: string | null;
+  decidedBy: number | null;
+  decidedByName: string | null;
+  decidedAt: Date | null;
+  rejectionReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ============ BOM: PACKAGES ============
 export interface BomPackage {
   id: number;

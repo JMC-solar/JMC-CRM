@@ -42,6 +42,7 @@ import type {
   PurchaseOrder,
   PurchaseOrderItem,
   PoPayment,
+  PoPaymentRequest,
   Quotation,
   QuotationItem,
   DeliveryReceipt,
@@ -122,6 +123,20 @@ async function recalcQuotationTotals(quotationId: number): Promise<void> {
 function crItems(r: CashRequest): CashRequestItem[] {
   if (r.items && r.items.length > 0) return r.items;
   return [{ purposeOptionId: r.purposeOptionId, purposeLabel: r.purposeLabel, amount: r.amount }];
+}
+
+/** Recompute a PO's paidAmount + paymentStatus from its current payments. Call after any add/edit/delete of a payment so totals never drift. */
+async function recomputePoTotals(purchaseOrderId: number): Promise<void> {
+  const [payments, po] = await Promise.all([
+    fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", purchaseOrderId]] }),
+    fsGetById<PurchaseOrder>("purchase_orders", purchaseOrderId),
+  ]);
+  const paidAmount = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+  const totalAmount = parseFloat(po?.totalAmount || "0");
+  let paymentStatus: "unpaid" | "partially_paid" | "paid" = "unpaid";
+  if (paidAmount >= totalAmount && totalAmount > 0) paymentStatus = "paid";
+  else if (paidAmount > 0) paymentStatus = "partially_paid";
+  await fsUpdateOne("purchase_orders", purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
 }
 
 export const appRouter = router({
@@ -1388,14 +1403,17 @@ export const appRouter = router({
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
       const po = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       if (!po) throw new Error("Purchase order not found");
-      const [items, payments, statusHistory] = await Promise.all([
+      const [items, payments, statusHistory, allPaymentRequests] = await Promise.all([
         fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<{ id: number; purchaseOrderId: number; type: string; status: string; eventDate: Date; changedBy: number; changedByName: string; createdAt: Date }>("po_status_history", { where: [["purchaseOrderId", "==", input.id]] }),
+        fsListAll<PoPaymentRequest>("po_payment_requests", { where: [["purchaseOrderId", "==", input.id]] }),
       ]);
       payments.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       statusHistory.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
-      return { ...po, items, payments, statusHistory };
+      // Only pending requests matter for the payments panel (badges + approvals).
+      const paymentRequests = allPaymentRequests.filter(r => r.status === "pending");
+      return { ...po, items, payments, statusHistory, paymentRequests };
     }),
 
     create: protectedProcedure.input(z.object({
@@ -1583,6 +1601,118 @@ export const appRouter = router({
       else if (paidAmount > 0) paymentStatus = "partially_paid";
       await fsUpdateOne("purchase_orders", input.purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
       await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Method: ${input.paymentMethod || 'N/A'}. Ref: ${input.reference || 'N/A'}`);
+      return { success: true };
+    }),
+
+    // ----- Payment corrections: admins act directly; everyone else must request -----
+
+    // Admin: edit a payment in place.
+    updatePayment: adminProcedure.input(z.object({
+      paymentId: z.number(),
+      amount: z.string().min(1),
+      paymentDate: z.string().min(1),
+      paymentMethod: z.string().optional(),
+      reference: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const payment = await fsGetById<PoPayment>("po_payments", input.paymentId);
+      if (!payment) throw new Error("Payment not found");
+      await fsUpdateOne("po_payments", input.paymentId, {
+        amount: input.amount,
+        paymentDate: new Date(input.paymentDate),
+        paymentMethod: input.paymentMethod ?? null,
+        reference: input.reference ?? null,
+        notes: input.notes ?? null,
+      });
+      await recomputePoTotals(payment.purchaseOrderId);
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "po_payment", input.paymentId, `Edited payment #${input.paymentId} on PO #${payment.purchaseOrderId} -> ₱${input.amount}`);
+      return { success: true, purchaseOrderId: payment.purchaseOrderId };
+    }),
+
+    // Admin: delete a payment.
+    deletePayment: adminProcedure.input(z.object({ paymentId: z.number() })).mutation(async ({ input, ctx }) => {
+      const payment = await fsGetById<PoPayment>("po_payments", input.paymentId);
+      if (!payment) throw new Error("Payment not found");
+      await fsDeleteOne("po_payments", input.paymentId);
+      await recomputePoTotals(payment.purchaseOrderId);
+      // Any pending request on this payment is now moot.
+      const pending = await fsListAll<PoPaymentRequest>("po_payment_requests", { where: [["paymentId", "==", input.paymentId], ["status", "==", "pending"]] });
+      await Promise.all(pending.map(r => fsUpdateOne("po_payment_requests", r.id, { status: "rejected", rejectionReason: "Payment was deleted", decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() })));
+      await fsAudit(ctx.user.id, ctx.user.name, "delete", "po_payment", input.paymentId, `Deleted payment #${input.paymentId} (₱${payment.amount}) on PO #${payment.purchaseOrderId}`);
+      return { success: true, purchaseOrderId: payment.purchaseOrderId };
+    }),
+
+    // Non-admin: request an edit or delete of a payment (needs admin approval).
+    requestPaymentChange: protectedProcedure.input(z.object({
+      paymentId: z.number(),
+      type: z.enum(["edit", "delete"]),
+      reason: z.string().optional(),
+      amount: z.string().optional(),
+      paymentDate: z.string().optional(),
+      paymentMethod: z.string().optional(),
+      reference: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const payment = await fsGetById<PoPayment>("po_payments", input.paymentId);
+      if (!payment) throw new Error("Payment not found");
+      const existing = await fsListAll<PoPaymentRequest>("po_payment_requests", { where: [["paymentId", "==", input.paymentId], ["status", "==", "pending"]] });
+      if (existing.length > 0) throw new Error("There is already a pending request on this payment");
+      const id = await fsInsertOne("po_payment_requests", {
+        purchaseOrderId: payment.purchaseOrderId,
+        paymentId: input.paymentId,
+        type: input.type,
+        proposedAmount: input.type === "edit" ? (input.amount ?? null) : null,
+        proposedPaymentDate: input.type === "edit" && input.paymentDate ? new Date(input.paymentDate) : null,
+        proposedPaymentMethod: input.type === "edit" ? (input.paymentMethod ?? null) : null,
+        proposedReference: input.type === "edit" ? (input.reference ?? null) : null,
+        proposedNotes: input.type === "edit" ? (input.notes ?? null) : null,
+        reason: input.reason ?? null,
+        status: "pending",
+        requestedBy: ctx.user.id,
+        requestedByName: ctx.user.name || "Unknown",
+        decidedBy: null, decidedByName: null, decidedAt: null, rejectionReason: null,
+      });
+      const admins = (await listUsersRaw()).filter(u => u.role === "admin");
+      await Promise.all(admins.map(a => fsInsertOne("notifications", {
+        userId: a.id, type: "po_payment_change_request",
+        message: `${ctx.user.name || "A sub-admin"} requested to ${input.type} a payment on PO #${payment.purchaseOrderId}`,
+        link: `/purchase-orders/${payment.purchaseOrderId}`, entityId: payment.purchaseOrderId, read: false,
+      })));
+      await fsAudit(ctx.user.id, ctx.user.name, "request", "po_payment", input.paymentId, `Requested ${input.type} of payment #${input.paymentId} on PO #${payment.purchaseOrderId}`);
+      return { success: true, id };
+    }),
+
+    // Admin: approve a request (applies the edit/delete).
+    approvePaymentChange: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoPaymentRequest>("po_payment_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      const payment = await fsGetById<PoPayment>("po_payments", req.paymentId);
+      if (!payment) throw new Error("The payment no longer exists");
+      if (req.type === "delete") {
+        await fsDeleteOne("po_payments", req.paymentId);
+      } else {
+        await fsUpdateOne("po_payments", req.paymentId, {
+          amount: req.proposedAmount ?? payment.amount,
+          paymentDate: req.proposedPaymentDate ?? payment.paymentDate,
+          paymentMethod: req.proposedPaymentMethod ?? null,
+          reference: req.proposedReference ?? null,
+          notes: req.proposedNotes ?? null,
+        });
+      }
+      await recomputePoTotals(req.purchaseOrderId);
+      await fsUpdateOne("po_payment_requests", input.id, { status: "approved", decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_payment_change_approved", message: `Your request to ${req.type} a payment on PO #${req.purchaseOrderId} was approved.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "po_payment", req.paymentId, `Approved ${req.type} of payment #${req.paymentId} on PO #${req.purchaseOrderId}`);
+      return { success: true };
+    }),
+
+    // Admin: reject a request.
+    rejectPaymentChange: adminProcedure.input(z.object({ id: z.number(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoPaymentRequest>("po_payment_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      await fsUpdateOne("po_payment_requests", input.id, { status: "rejected", rejectionReason: input.reason ?? null, decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_payment_change_rejected", message: `Your request to ${req.type} a payment on PO #${req.purchaseOrderId} was rejected.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "po_payment", req.paymentId, `Rejected ${req.type} of payment #${req.paymentId} on PO #${req.purchaseOrderId}`);
       return { success: true };
     }),
 
