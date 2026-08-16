@@ -250,6 +250,33 @@ export interface PoPaymentRequest {
   updatedAt: Date;
 }
 
+// A sub-admin's request to correct how much of a PO's items were received
+// (fixing a wrong "Receive Delivery" — e.g. undo an accidental receipt by
+// setting the quantity back down). An admin approves it; admins correct
+// directly. Applying reconciles inventory by the delta per line.
+export interface PoDeliveryRequestLine {
+  poItemId: number;
+  itemName: string | null;
+  currentReceived: number;
+  requestedReceived: number;
+}
+export interface PoDeliveryRequest {
+  id: number;
+  purchaseOrderId: number;
+  poNumber: string | null;
+  lines: PoDeliveryRequestLine[];
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  requestedBy: number | null;
+  requestedByName: string | null;
+  decidedBy: number | null;
+  decidedByName: string | null;
+  decidedAt: Date | null;
+  rejectionReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ============ BOM: PACKAGES ============
 export interface BomPackage {
   id: number;
