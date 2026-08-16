@@ -40,6 +40,12 @@ router.get("/api/purchase-orders/:id/pdf", requireAuth, async (req, res) => {
 function generatePoHtml(po: any, items: any[], supplier: any, createdByUser: any) {
   const subtotal = items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0);
   const total = Number(po.totalAmount || subtotal);
+  // Currency of this PO. `sym` labels every amount; foreign POs also print a ₱ equivalent.
+  const currency = po.currency || "PHP";
+  const sym = ({ PHP: "₱", USD: "$", CNY: "¥" } as Record<string, string>)[currency] || `${currency} `;
+  const rate = parseFloat(po.exchangeRate || "0");
+  const isForeign = currency !== "PHP" && rate > 0;
+  const php = (n: number) => `₱${n.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const vatEnabled = po.vatEnabled === 1 || po.vatEnabled === true;
   const vatRate = parseFloat(po.vatRate || "12");
   const discountType = po.discountType || "none";
@@ -59,8 +65,8 @@ function generatePoHtml(po: any, items: any[], supplier: any, createdByUser: any
       </td>
       <td style="text-align:center;">${item.quantity}</td>
       <td style="text-align:center;">${item.unit || 'pc'}</td>
-      <td style="text-align:right;">₱${Number(item.unitPrice || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-      <td style="text-align:right;">₱${Number(item.lineTotal || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      <td style="text-align:right;">${sym}${Number(item.unitPrice || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      <td style="text-align:right;">${sym}${Number(item.lineTotal || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
     </tr>
   `).join("");
 
@@ -361,24 +367,30 @@ function generatePoHtml(po: any, items: any[], supplier: any, createdByUser: any
       <div class="totals-box">
         <div class="total-row">
           <span>Subtotal</span>
-          <span>₱${subtotal.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span>${sym}${subtotal.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
         ${discountAmount > 0 ? `
         <div class="total-row">
           <span>Discount ${discountType === "percentage" ? `(${discountValue}%)` : "(Fixed)"}</span>
-          <span style="color:#c0392b;">-₱${discountAmount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span style="color:#c0392b;">-${sym}${discountAmount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
         ` : ''}
         ${vatEnabled ? `
         <div class="total-row">
           <span>VAT (${vatRate}%)</span>
-          <span>₱${vatAmount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span>${sym}${vatAmount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
         ` : ''}
         <div class="total-row grand-total">
           <span>GRAND TOTAL</span>
-          <span>₱${total.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          <span>${sym}${total.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
+        ${isForeign ? `
+        <div class="total-row" style="font-size:11px;color:#555;">
+          <span>Approx. in Pesos (1 ${currency} = ₱${rate})</span>
+          <span>${php(total * rate)}</span>
+        </div>
+        ` : ''}
       </div>
     </div>
 
