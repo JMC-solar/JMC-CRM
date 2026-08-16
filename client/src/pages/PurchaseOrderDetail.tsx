@@ -86,9 +86,12 @@ export default function PurchaseOrderDetail() {
   const poId = parseInt(params.id || "0");
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [statusDialogOpen, setStatusDialogOpen] = useState(false);
+  const [receiveDialogOpen, setReceiveDialogOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("");
   const [statusDate, setStatusDate] = useState<DateParts>(todayParts());
-  const [deliveryDate, setDeliveryDate] = useState<DateParts>(todayParts());
+  const [receiveDate, setReceiveDate] = useState<DateParts>(todayParts());
+  // How many of each PO line item is arriving in this delivery, keyed by item id.
+  const [receiveQty, setReceiveQty] = useState<Record<number, string>>({});
   // Editing / deleting a payment (admins act directly; others submit a request).
   const [editingPayment, setEditingPayment] = useState<any>(null);
   const [editMethod, setEditMethod] = useState("");
@@ -158,7 +161,26 @@ export default function PurchaseOrderDetail() {
   };
 
   const updateMutation = trpc.purchaseOrders.update.useMutation({
-    onSuccess: () => { toast.success("PO updated"); utils.purchaseOrders.get.invalidate({ id: poId }); setStatusDialogOpen(false); },
+    onSuccess: () => {
+      toast.success("PO updated");
+      utils.purchaseOrders.get.invalidate({ id: poId });
+      setStatusDialogOpen(false);
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const receiveMutation = trpc.purchaseOrders.receiveDelivery.useMutation({
+    onSuccess: (data: any) => {
+      if (data?.stockedUnits > 0) {
+        toast.success(`Delivery recorded — ${data.stockedUnits} unit(s) stocked into inventory`);
+      } else {
+        toast.success("Delivery recorded");
+      }
+      utils.purchaseOrders.get.invalidate({ id: poId });
+      utils.inventory.invalidate(); // reflect the new stock on inventory pages
+      setReceiveDialogOpen(false);
+      setReceiveQty({});
+    },
     onError: (err: any) => toast.error(err.message),
   });
 
@@ -186,10 +208,20 @@ export default function PurchaseOrderDetail() {
     updateMutation.mutate({
       id: poId,
       status: (fd.get("status") as string) || undefined,
-      deliveryStatus: (fd.get("deliveryStatus") as string) || undefined,
       statusDate: partsToISO(statusDate),
-      deliveryDate: partsToISO(deliveryDate),
     });
+  };
+
+  const handleReceiveSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const lines = (po?.items ?? [])
+      .map((it: any) => ({ poItemId: it.id, quantity: Math.floor(Number(receiveQty[it.id] ?? "0")) || 0 }))
+      .filter((l: any) => l.quantity > 0);
+    if (lines.length === 0) {
+      toast.error("Enter a received quantity for at least one item.");
+      return;
+    }
+    receiveMutation.mutate({ purchaseOrderId: poId, deliveryDate: partsToISO(receiveDate), items: lines });
   };
 
   if (isLoading) {
@@ -219,6 +251,12 @@ export default function PurchaseOrderDetail() {
   const poDiscountAmount = poDiscountType === "percentage" ? poSubtotal * (poDiscountValue / 100) : poDiscountType === "fixed" ? poDiscountValue : 0;
   const poAfterDiscount = poSubtotal - poDiscountAmount;
   const poVatAmount = poVatEnabled ? poAfterDiscount * (poVatRate / 100) : 0;
+
+  // Delivery/receiving progress across all line items.
+  const totalOrderedUnits = po.items?.reduce((s: number, it: any) => s + (Number(it.quantity) || 0), 0) || 0;
+  const totalReceivedUnits = po.items?.reduce((s: number, it: any) => s + (Number(it.receivedQuantity) || 0), 0) || 0;
+  const totalBalanceUnits = Math.max(totalOrderedUnits - totalReceivedUnits, 0);
+  const hasBalanceToReceive = po.items?.some((it: any) => (Number(it.quantity) || 0) - (Number(it.receivedQuantity) || 0) > 0) || false;
 
   return (
     <div className="space-y-6">
@@ -259,21 +297,70 @@ export default function PurchaseOrderDetail() {
                   <DateSelect value={statusDate} onChange={setStatusDate} />
                   <p className="text-xs text-muted-foreground mt-1">Recorded only when the order status changes.</p>
                 </div>
-                <div>
-                  <Label>Delivery Status</Label>
-                  <select name="deliveryStatus" defaultValue={po.deliveryStatus} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
-                    <option value="not_delivered">Not Delivered</option>
-                    <option value="partially_delivered">Partially Delivered</option>
-                    <option value="fully_delivered">Fully Delivered</option>
-                  </select>
+                <p className="text-xs text-muted-foreground">Delivery is tracked separately — use <span className="text-foreground font-medium">Receive Delivery</span> to log arrived items and update the delivery status.</p>
+                <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
+                  {updateMutation.isPending ? "Updating..." : "Update Status"}
+                </Button>
+              </form>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={receiveDialogOpen} onOpenChange={(o) => { setReceiveDialogOpen(o); if (o) { setReceiveQty(Object.fromEntries((po.items ?? []).map((it: any) => [it.id, String(Math.max((Number(it.quantity) || 0) - (Number(it.receivedQuantity) || 0), 0))]))); } }}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="border-border" disabled={!hasBalanceToReceive}>
+                <Package className="h-4 w-4 mr-2" /> Receive Delivery
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="bg-card border-border max-w-2xl">
+              <DialogHeader><DialogTitle className="text-foreground">Receive Delivery</DialogTitle></DialogHeader>
+              <form onSubmit={handleReceiveSubmit} className="space-y-4">
+                <p className="text-xs text-muted-foreground">Enter how many of each item arrived in this delivery. The quantities are added straight to inventory, and the PO's remaining balance updates automatically. Defaults to the full outstanding balance.</p>
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="text-left p-2 font-medium text-muted-foreground">Item</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Ordered</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Received</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Balance</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Receiving now</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(po.items ?? []).map((it: any) => {
+                        const ordered = Number(it.quantity) || 0;
+                        const received = Number(it.receivedQuantity) || 0;
+                        const bal = Math.max(ordered - received, 0);
+                        return (
+                          <tr key={it.id} className="border-b border-border/50 last:border-0">
+                            <td className="p-2 text-foreground">{it.itemName}<span className="ml-1 text-xs text-muted-foreground">{it.unit || "pcs"}</span></td>
+                            <td className="p-2 text-right text-muted-foreground">{ordered}</td>
+                            <td className="p-2 text-right text-muted-foreground">{received}</td>
+                            <td className="p-2 text-right text-yellow-400">{bal}</td>
+                            <td className="p-2 text-right">
+                              <Input
+                                type="number" min={0} max={bal} step={1}
+                                disabled={bal === 0}
+                                value={receiveQty[it.id] ?? ""}
+                                onChange={(e) => {
+                                  const raw = Math.floor(Number(e.target.value) || 0);
+                                  const clamped = Math.max(0, Math.min(raw, bal));
+                                  setReceiveQty((prev) => ({ ...prev, [it.id]: e.target.value === "" ? "" : String(clamped) }));
+                                }}
+                                className="bg-input border-border w-24 text-right ml-auto"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
                 <div>
                   <Label>Delivery Date</Label>
-                  <DateSelect value={deliveryDate} onChange={setDeliveryDate} />
-                  <p className="text-xs text-muted-foreground mt-1">Recorded only when the delivery status changes.</p>
+                  <DateSelect value={receiveDate} onChange={setReceiveDate} />
                 </div>
-                <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={updateMutation.isPending}>
-                  {updateMutation.isPending ? "Updating..." : "Update Status"}
+                <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={receiveMutation.isPending}>
+                  {receiveMutation.isPending ? "Recording..." : "Record Delivery & Stock In"}
                 </Button>
               </form>
             </DialogContent>
@@ -333,6 +420,12 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground mb-1">Delivery</p>
             <Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge>
+            {totalOrderedUnits > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {totalReceivedUnits.toLocaleString()} of {totalOrderedUnits.toLocaleString()} received
+                {totalBalanceUnits > 0 && <span className="text-yellow-400"> · {totalBalanceUnits.toLocaleString()} to go</span>}
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
@@ -401,32 +494,41 @@ export default function PurchaseOrderDetail() {
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Item</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Description</th>
                   <th className="text-left p-4 text-sm font-medium text-muted-foreground">Unit</th>
-                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Qty</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Ordered</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Received</th>
+                  <th className="text-right p-4 text-sm font-medium text-muted-foreground">Balance</th>
                   <th className="text-right p-4 text-sm font-medium text-muted-foreground">Unit Price</th>
                   <th className="text-right p-4 text-sm font-medium text-muted-foreground">Line Total</th>
                 </tr>
               </thead>
               <tbody>
-                {po.items?.map((item: any) => (
+                {po.items?.map((item: any) => {
+                  const ordered = Number(item.quantity) || 0;
+                  const received = Number(item.receivedQuantity) || 0;
+                  const bal = Math.max(ordered - received, 0);
+                  return (
                   <tr key={item.id} className="border-b border-border/50">
                     <td className="p-4 text-sm font-mono text-muted-foreground">{item.itemSku}</td>
                     <td className="p-4 font-medium text-foreground">{item.itemName}</td>
                     <td className="p-4 text-sm text-muted-foreground">{item.description || "-"}</td>
                     <td className="p-4 text-sm text-muted-foreground">{item.unit || "pcs"}</td>
-                    <td className="p-4 text-sm text-foreground text-right">{item.quantity}</td>
+                    <td className="p-4 text-sm text-foreground text-right">{ordered}</td>
+                    <td className="p-4 text-sm text-right"><span className={received > 0 ? "text-green-400" : "text-muted-foreground"}>{received}</span></td>
+                    <td className="p-4 text-sm text-right font-medium">{bal === 0 ? <span className="text-green-400">0</span> : <span className="text-yellow-400">{bal}</span>}</td>
                     <td className="p-4 text-sm text-foreground text-right">₱{Number(item.unitPrice || 0).toLocaleString()}</td>
                     <td className="p-4 text-sm font-medium text-foreground text-right">₱{Number(item.lineTotal || 0).toLocaleString()}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
               <tfoot>
                 <tr className="border-t border-border">
-                  <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">Subtotal:</td>
+                  <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">Subtotal:</td>
                   <td className="p-4 text-right font-medium text-foreground">₱{poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
                 {poDiscountAmount > 0 && (
                   <tr>
-                    <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">
+                    <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">
                       Discount ({poDiscountType === "percentage" ? `${poDiscountValue}%` : "Fixed"}):
                     </td>
                     <td className="p-4 text-right font-medium text-red-400">-₱{poDiscountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
@@ -434,12 +536,12 @@ export default function PurchaseOrderDetail() {
                 )}
                 {poVatEnabled && (
                   <tr>
-                    <td colSpan={6} className="p-4 text-right text-sm text-muted-foreground">VAT ({poVatRate}%):</td>
+                    <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">VAT ({poVatRate}%):</td>
                     <td className="p-4 text-right font-medium text-foreground">₱{poVatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                   </tr>
                 )}
                 <tr className="border-t border-border">
-                  <td colSpan={6} className="p-4 text-right font-medium text-foreground">Grand Total:</td>
+                  <td colSpan={8} className="p-4 text-right font-medium text-foreground">Grand Total:</td>
                   <td className="p-4 text-right font-bold text-foreground text-lg">₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
               </tfoot>

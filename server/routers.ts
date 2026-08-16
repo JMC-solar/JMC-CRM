@@ -139,6 +139,56 @@ async function recomputePoTotals(purchaseOrderId: number): Promise<void> {
   await fsUpdateOne("purchase_orders", purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
 }
 
+/**
+ * Stock a single received quantity into inventory against a PO: adds `quantity`
+ * to the inventory item's stock and logs a stock_in transaction + audit row,
+ * mirroring a manual stock-in so PO receipts look identical in inventory history.
+ * Runs atomically. Returns true if stocked, false if the inventory item is gone.
+ */
+async function stockInFromPo(itemId: number, quantity: number, po: PurchaseOrder, actorId: number, actorName: string): Promise<boolean> {
+  if (quantity <= 0) return false;
+  const txnId = await fsAllocateIds("stock_transactions");
+  const auditId = await fsAllocateIds("inventory_audit_log");
+  const now = new Date();
+  return await fdb().runTransaction(async (tx) => {
+    const itemRef = fdb().collection("inventory_items").doc(String(itemId));
+    const snap = await tx.get(itemRef);
+    if (!snap.exists) return false; // inventory item no longer exists — skip
+    const inv = snap.data() as InventoryItem;
+    const prevStock = inv.stockOnHand ?? 0;
+    const newStock = prevStock + quantity;
+    tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+      id: txnId, itemId, type: "stock_in", quantity,
+      reference: po.poNumber, purpose: "Purchase Order Receipt", purposeOptionId: null,
+      purposeRefId: po.id, purposeRefName: po.poNumber,
+      accountId: null, accountName: null, contactId: null, contactName: null,
+      notes: `Received on PO ${po.poNumber}`,
+      createdBy: actorId, createdByName: actorName || "Unknown", createdAt: now,
+    });
+    tx.set(itemRef, { stockOnHand: newStock, updatedAt: now }, { merge: true });
+    tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+      id: auditId, itemId, itemName: inv.name || null, itemSku: inv.sku || null,
+      transactionType: "stock_in", quantity, previousStock: prevStock, newStock,
+      sourceLocation: null, destinationLocation: inv.warehouseLocation || null,
+      reference: po.poNumber, purpose: `Purchase Order Receipt (${po.poNumber})`, notes: null,
+      performedBy: actorId, performedByName: actorName || "Unknown", createdAt: now,
+    });
+    return true;
+  });
+}
+
+/**
+ * Derive a PO's delivery status from how much of each line has been received:
+ * fully_delivered when every line is fully received, partially_delivered when
+ * some (but not all) has arrived, not_delivered when nothing has.
+ */
+function deriveDeliveryStatus(items: PurchaseOrderItem[]): "not_delivered" | "partially_delivered" | "fully_delivered" {
+  const anyReceived = items.some(i => (i.receivedQuantity ?? 0) > 0);
+  if (!anyReceived) return "not_delivered";
+  const allReceived = items.every(i => (i.receivedQuantity ?? 0) >= (i.quantity ?? 0));
+  return allReceived ? "fully_delivered" : "partially_delivered";
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -1570,6 +1620,62 @@ export const appRouter = router({
       if (historyInserts.length) await Promise.all(historyInserts);
       await fsAudit(ctx.user.id, ctx.user.name, "update", "purchase_order", input.id, `Updated PO #${input.id}: ${JSON.stringify(updates)}`);
       return { success: true };
+    }),
+
+    // Record a (partial or full) delivery of a PO. Each line's received quantity
+    // is stocked straight into inventory (stock_in txn + audit + stock bump),
+    // the PO item's cumulative receivedQuantity is advanced, and the PO's
+    // delivery status is re-derived (partially/fully delivered) so the remaining
+    // balance stays accurate. A line can never be over-received past its order.
+    receiveDelivery: protectedProcedure.input(z.object({
+      purchaseOrderId: z.number(),
+      deliveryDate: z.string().optional(),
+      items: z.array(z.object({
+        poItemId: z.number(),
+        quantity: z.number().min(0),
+      })).min(1),
+    })).mutation(async ({ input, ctx }) => {
+      const po = await fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId);
+      if (!po) throw new Error("Purchase order not found");
+      const poItems = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] });
+      const byId = new Map(poItems.map(i => [i.id, i]));
+      const actorName = ctx.user.name || "Unknown";
+
+      let stockedLines = 0;
+      let stockedUnits = 0;
+      for (const line of input.items) {
+        const poItem = byId.get(line.poItemId);
+        if (!poItem || line.quantity <= 0) continue;
+        const already = poItem.receivedQuantity ?? 0;
+        const balance = (poItem.quantity ?? 0) - already;
+        const qty = Math.min(line.quantity, Math.max(balance, 0)); // never past the ordered qty
+        if (qty <= 0) continue;
+        if (poItem.itemId) {
+          const ok = await stockInFromPo(poItem.itemId, qty, po, ctx.user.id, actorName);
+          if (ok) { stockedLines++; stockedUnits += qty; }
+        }
+        await fsUpdateOne("purchase_order_items", poItem.id, { receivedQuantity: already + qty });
+        poItem.receivedQuantity = already + qty; // keep local copy in sync for status derivation
+      }
+
+      // Re-derive delivery status from the (now updated) received quantities.
+      const newStatus = deriveDeliveryStatus(poItems);
+      const when = input.deliveryDate ? new Date(input.deliveryDate) : new Date();
+      const poUpdates: Record<string, unknown> = { deliveryStatus: newStatus };
+      if (newStatus === "fully_delivered") poUpdates.deliveredAt = when;
+      await fsUpdateOne("purchase_orders", input.purchaseOrderId, poUpdates);
+      if (newStatus !== po.deliveryStatus) {
+        await fsInsertOne("po_status_history", {
+          purchaseOrderId: input.purchaseOrderId,
+          type: "delivery",
+          status: newStatus,
+          eventDate: when,
+          changedBy: ctx.user.id,
+          changedByName: actorName,
+        });
+      }
+      await fsAudit(ctx.user.id, ctx.user.name, "receive", "purchase_order", input.purchaseOrderId, `Received delivery on PO ${po.poNumber}: stocked ${stockedUnits} unit(s) across ${stockedLines} item(s); delivery status now ${newStatus}`);
+      return { success: true, stockedLines, stockedUnits, deliveryStatus: newStatus };
     }),
 
     addPayment: protectedProcedure.input(z.object({
