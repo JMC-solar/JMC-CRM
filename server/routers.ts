@@ -139,6 +139,55 @@ async function recomputePoTotals(purchaseOrderId: number): Promise<void> {
   await fsUpdateOne("purchase_orders", purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
 }
 
+/**
+ * Auto stock-in every line item of a received PO: for each item, add its ordered
+ * quantity to the inventory item's stock, log a stock_in transaction + audit row
+ * (mirroring a manual stock-in), then flag the PO so it's never double-stocked.
+ * Returns how many items were stocked. No-op if the PO was already stocked.
+ */
+async function autoStockInPO(poId: number, actorId: number, actorName: string): Promise<number> {
+  const po = await fsGetById<PurchaseOrder>("purchase_orders", poId);
+  if (!po || po.stockReceived) return 0;
+  const items = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", poId]] });
+  const now = new Date();
+  let count = 0;
+  for (const it of items) {
+    if (!it.itemId || !it.quantity || it.quantity <= 0) continue;
+    const txnId = await fsAllocateIds("stock_transactions");
+    const auditId = await fsAllocateIds("inventory_audit_log");
+    const done = await fdb().runTransaction(async (tx) => {
+      const itemRef = fdb().collection("inventory_items").doc(String(it.itemId));
+      const snap = await tx.get(itemRef);
+      if (!snap.exists) return false; // inventory item no longer exists — skip
+      const inv = snap.data() as InventoryItem;
+      const prevStock = inv.stockOnHand ?? 0;
+      const newStock = prevStock + it.quantity;
+      tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+        id: txnId, itemId: it.itemId, type: "stock_in", quantity: it.quantity,
+        reference: po.poNumber, purpose: "Purchase Order Receipt", purposeOptionId: null,
+        purposeRefId: poId, purposeRefName: po.poNumber,
+        accountId: null, accountName: null, contactId: null, contactName: null,
+        notes: `Auto stock-in on PO delivery (${po.poNumber})`,
+        createdBy: actorId, createdByName: actorName || "Unknown", createdAt: now,
+      });
+      tx.set(itemRef, { stockOnHand: newStock, updatedAt: now }, { merge: true });
+      tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+        id: auditId, itemId: it.itemId, itemName: inv.name || null, itemSku: inv.sku || null,
+        transactionType: "stock_in", quantity: it.quantity, previousStock: prevStock, newStock,
+        sourceLocation: null, destinationLocation: inv.warehouseLocation || null,
+        reference: po.poNumber, purpose: `Purchase Order Receipt (${po.poNumber})`, notes: null,
+        performedBy: actorId, performedByName: actorName || "Unknown", createdAt: now,
+      });
+      return true;
+    });
+    if (done) count++;
+  }
+  await fsUpdateOne("purchase_orders", poId, { stockReceived: true });
+  await Promise.all(items.map(it => it.itemId ? fsUpdateOne("purchase_order_items", it.id, { receivedQuantity: it.quantity }) : Promise.resolve()));
+  await fsAudit(actorId, actorName, "stock_in", "purchase_order", poId, `Auto-stocked ${count} item(s) into inventory on delivery of PO ${po.poNumber}`);
+  return count;
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -1569,7 +1618,13 @@ export const appRouter = router({
       await fsUpdateOne("purchase_orders", input.id, updates);
       if (historyInserts.length) await Promise.all(historyInserts);
       await fsAudit(ctx.user.id, ctx.user.name, "update", "purchase_order", input.id, `Updated PO #${input.id}: ${JSON.stringify(updates)}`);
-      return { success: true };
+      // When the goods are marked fully delivered, auto stock-in the PO items
+      // (once — the PO's stockReceived flag prevents double-adding).
+      let stockedItems = 0;
+      if (input.deliveryStatus === "fully_delivered") {
+        stockedItems = await autoStockInPO(input.id, ctx.user.id, ctx.user.name || "Unknown");
+      }
+      return { success: true, stockedItems };
     }),
 
     addPayment: protectedProcedure.input(z.object({

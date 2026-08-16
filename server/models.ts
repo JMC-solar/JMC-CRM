@@ -190,6 +190,9 @@ export interface PurchaseOrder {
   orderedAt: Date | null;
   receivedAt: Date | null;
   deliveredAt: Date | null;
+  // Set true once the PO's items have been auto-stocked into inventory (on
+  // "fully delivered"), so they're never double-added. Absent = not yet stocked.
+  stockReceived?: boolean;
   createdBy: number | null;
   createdByName: string | null;
   createdAt: Date;

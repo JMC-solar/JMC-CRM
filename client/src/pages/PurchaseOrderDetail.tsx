@@ -158,7 +158,16 @@ export default function PurchaseOrderDetail() {
   };
 
   const updateMutation = trpc.purchaseOrders.update.useMutation({
-    onSuccess: () => { toast.success("PO updated"); utils.purchaseOrders.get.invalidate({ id: poId }); setStatusDialogOpen(false); },
+    onSuccess: (data: any) => {
+      if (data?.stockedItems > 0) {
+        toast.success(`PO updated — ${data.stockedItems} item(s) auto-stocked into inventory`);
+      } else {
+        toast.success("PO updated");
+      }
+      utils.purchaseOrders.get.invalidate({ id: poId });
+      utils.inventory.invalidate(); // reflect the new stock on inventory pages
+      setStatusDialogOpen(false);
+    },
     onError: (err: any) => toast.error(err.message),
   });
 
@@ -333,6 +342,9 @@ export default function PurchaseOrderDetail() {
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground mb-1">Delivery</p>
             <Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge>
+            {po.stockReceived && (
+              <p className="mt-1 text-xs text-green-400 flex items-center gap-1"><Check className="h-3 w-3" /> Stocked to inventory</p>
+            )}
           </CardContent>
         </Card>
         <Card className="bg-card border-border">
