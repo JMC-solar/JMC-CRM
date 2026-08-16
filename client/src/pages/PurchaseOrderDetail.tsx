@@ -92,6 +92,10 @@ export default function PurchaseOrderDetail() {
   const [receiveDate, setReceiveDate] = useState<DateParts>(todayParts());
   // How many of each PO line item is arriving in this delivery, keyed by item id.
   const [receiveQty, setReceiveQty] = useState<Record<number, string>>({});
+  // Correcting/undoing a wrong receipt: target received qty per line + reason.
+  const [editReceivedOpen, setEditReceivedOpen] = useState(false);
+  const [editReceivedQty, setEditReceivedQty] = useState<Record<number, string>>({});
+  const [correctionReason, setCorrectionReason] = useState("");
   // Editing / deleting a payment (admins act directly; others submit a request).
   const [editingPayment, setEditingPayment] = useState<any>(null);
   const [editMethod, setEditMethod] = useState("");
@@ -184,6 +188,28 @@ export default function PurchaseOrderDetail() {
     onError: (err: any) => toast.error(err.message),
   });
 
+  const afterCorrection = () => {
+    utils.purchaseOrders.get.invalidate({ id: poId });
+    utils.inventory.invalidate();
+    setEditReceivedOpen(false);
+  };
+  const correctDeliveryMutation = trpc.purchaseOrders.correctDelivery.useMutation({
+    onSuccess: () => { toast.success("Received quantities corrected — inventory updated"); afterCorrection(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const requestCorrectionMutation = trpc.purchaseOrders.requestDeliveryCorrection.useMutation({
+    onSuccess: () => { toast.success("Correction submitted for admin approval"); afterCorrection(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const approveCorrectionMutation = trpc.purchaseOrders.approveDeliveryCorrection.useMutation({
+    onSuccess: () => { toast.success("Correction approved — inventory updated"); utils.purchaseOrders.get.invalidate({ id: poId }); utils.inventory.invalidate(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const rejectCorrectionMutation = trpc.purchaseOrders.rejectDeliveryCorrection.useMutation({
+    onSuccess: () => { toast.success("Correction rejected"); utils.purchaseOrders.get.invalidate({ id: poId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
   const addPaymentMutation = trpc.purchaseOrders.addPayment.useMutation({
     onSuccess: () => { toast.success("Payment recorded"); utils.purchaseOrders.get.invalidate({ id: poId }); setPaymentDialogOpen(false); setPaymentMethod(""); },
     onError: (err: any) => toast.error(err.message),
@@ -224,6 +250,29 @@ export default function PurchaseOrderDetail() {
     receiveMutation.mutate({ purchaseOrderId: poId, deliveryDate: partsToISO(receiveDate), items: lines });
   };
 
+  const handleCorrectionSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const lines = (po?.items ?? [])
+      .map((it: any) => {
+        const ordered = Number(it.quantity) || 0;
+        const current = Number(it.receivedQuantity) || 0;
+        const raw = editReceivedQty[it.id];
+        const target = raw === undefined || raw === "" ? current : Math.max(0, Math.min(Math.floor(Number(raw) || 0), ordered));
+        return { poItemId: it.id, target, current };
+      })
+      .filter((l: any) => l.target !== l.current);
+    if (lines.length === 0) {
+      toast.error("Change at least one received quantity.");
+      return;
+    }
+    if (isAdmin) {
+      correctDeliveryMutation.mutate({ purchaseOrderId: poId, lines: lines.map((l: any) => ({ poItemId: l.poItemId, receivedQuantity: l.target })) });
+    } else {
+      if (!correctionReason.trim()) { toast.error("Please give a reason for the admin."); return; }
+      requestCorrectionMutation.mutate({ purchaseOrderId: poId, reason: correctionReason.trim(), lines: lines.map((l: any) => ({ poItemId: l.poItemId, requestedReceived: l.target })) });
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">Loading...</div>
@@ -257,6 +306,7 @@ export default function PurchaseOrderDetail() {
   const totalReceivedUnits = po.items?.reduce((s: number, it: any) => s + (Number(it.receivedQuantity) || 0), 0) || 0;
   const totalBalanceUnits = Math.max(totalOrderedUnits - totalReceivedUnits, 0);
   const hasBalanceToReceive = po.items?.some((it: any) => (Number(it.quantity) || 0) - (Number(it.receivedQuantity) || 0) > 0) || false;
+  const pendingDeliveryRequest = (po.deliveryRequests ?? [])[0] || null; // a PO holds at most one pending correction
 
   return (
     <div className="space-y-6">
@@ -365,6 +415,78 @@ export default function PurchaseOrderDetail() {
               </form>
             </DialogContent>
           </Dialog>
+          {totalReceivedUnits > 0 && (
+            <Dialog open={editReceivedOpen} onOpenChange={(o) => { setEditReceivedOpen(o); if (o) { setEditReceivedQty(Object.fromEntries((po.items ?? []).map((it: any) => [it.id, String(Number(it.receivedQuantity) || 0)]))); setCorrectionReason(""); } }}>
+              <DialogTrigger asChild>
+                <Button variant="outline" className="border-border" disabled={!!pendingDeliveryRequest} title={pendingDeliveryRequest ? "A correction is awaiting admin approval" : undefined}>
+                  <Pencil className="h-4 w-4 mr-2" /> Edit / Undo Received
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="bg-card border-border max-w-2xl">
+                <DialogHeader><DialogTitle className="text-foreground">{isAdmin ? "Edit / Undo Received Quantities" : "Request Received-Quantity Correction"}</DialogTitle></DialogHeader>
+                <form onSubmit={handleCorrectionSubmit} className="space-y-4">
+                  <p className="text-xs text-muted-foreground">
+                    Fix a wrong receipt by setting the correct <span className="text-foreground font-medium">total received</span> for each item — lowering it removes the wrongly-added stock from inventory, raising it adds more. To fully undo an accidental receipt, set it back to 0.
+                    {!isAdmin && " Your change is sent to an admin for approval before anything moves."}
+                  </p>
+                  <div className="overflow-x-auto rounded-md border border-border">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border">
+                          <th className="text-left p-2 font-medium text-muted-foreground">Item</th>
+                          <th className="text-right p-2 font-medium text-muted-foreground">Ordered</th>
+                          <th className="text-right p-2 font-medium text-muted-foreground">Received now</th>
+                          <th className="text-right p-2 font-medium text-muted-foreground">Correct to</th>
+                          <th className="text-right p-2 font-medium text-muted-foreground">Stock change</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(po.items ?? []).map((it: any) => {
+                          const ordered = Number(it.quantity) || 0;
+                          const current = Number(it.receivedQuantity) || 0;
+                          const raw = editReceivedQty[it.id];
+                          const target = raw === undefined || raw === "" ? current : Math.max(0, Math.min(Math.floor(Number(raw) || 0), ordered));
+                          const delta = target - current;
+                          return (
+                            <tr key={it.id} className="border-b border-border/50 last:border-0">
+                              <td className="p-2 text-foreground">{it.itemName}<span className="ml-1 text-xs text-muted-foreground">{it.unit || "pcs"}</span></td>
+                              <td className="p-2 text-right text-muted-foreground">{ordered}</td>
+                              <td className="p-2 text-right text-muted-foreground">{current}</td>
+                              <td className="p-2 text-right">
+                                <Input
+                                  type="number" min={0} max={ordered} step={1}
+                                  value={editReceivedQty[it.id] ?? ""}
+                                  onChange={(e) => {
+                                    const clamped = e.target.value === "" ? "" : String(Math.max(0, Math.min(Math.floor(Number(e.target.value) || 0), ordered)));
+                                    setEditReceivedQty((prev) => ({ ...prev, [it.id]: clamped }));
+                                  }}
+                                  className="bg-input border-border w-24 text-right ml-auto"
+                                />
+                              </td>
+                              <td className="p-2 text-right font-medium">
+                                {delta === 0 ? <span className="text-muted-foreground">—</span> : delta > 0 ? <span className="text-green-400">+{delta}</span> : <span className="text-red-400">{delta}</span>}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {!isAdmin && (
+                    <div>
+                      <Label>Reason for the admin *</Label>
+                      <Textarea value={correctionReason} onChange={(e) => setCorrectionReason(e.target.value)} className="bg-input border-border" placeholder="e.g. Pressed Receive by mistake — nothing has actually arrived yet." />
+                    </div>
+                  )}
+                  <Button type="submit" className="w-full bg-primary text-primary-foreground" disabled={correctDeliveryMutation.isPending || requestCorrectionMutation.isPending}>
+                    {isAdmin
+                      ? (correctDeliveryMutation.isPending ? "Applying..." : "Apply Correction")
+                      : (requestCorrectionMutation.isPending ? "Submitting..." : "Submit for Admin Approval")}
+                  </Button>
+                </form>
+              </DialogContent>
+            </Dialog>
+          )}
           <Dialog open={paymentDialogOpen} onOpenChange={setPaymentDialogOpen}>
             <DialogTrigger asChild>
               <Button className="bg-primary text-primary-foreground"><CreditCard className="h-4 w-4 mr-2" /> Record Payment</Button>
@@ -609,6 +731,40 @@ export default function PurchaseOrderDetail() {
       </Card>
 
       {/* Pending change requests (edit/delete) awaiting admin action */}
+      {po.deliveryRequests && po.deliveryRequests.length > 0 && (
+        <Card className="bg-card border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-foreground flex items-center gap-2"><Clock className="h-5 w-5 text-yellow-400" /> Pending Delivery Correction Requests</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {po.deliveryRequests.map((req: any) => (
+              <div key={req.id} className="rounded-md border border-border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="text-sm">
+                    <div className="font-medium text-foreground">Correct received quantities</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">Requested by {req.requestedByName || "Unknown"}</div>
+                    <ul className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                      {(req.lines ?? []).map((l: any, i: number) => (
+                        <li key={i}>{l.itemName || `Item #${l.poItemId}`}: <span className="text-foreground">{l.currentReceived} → {l.requestedReceived}</span></li>
+                      ))}
+                    </ul>
+                    {req.reason && <div className="text-xs text-muted-foreground mt-1">Reason: {req.reason}</div>}
+                  </div>
+                  {isAdmin ? (
+                    <div className="flex gap-2 shrink-0">
+                      <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => approveCorrectionMutation.mutate({ id: req.id })} disabled={approveCorrectionMutation.isPending}><Check className="h-4 w-4 mr-1" /> Approve</Button>
+                      <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => { const r = window.prompt("Reason for rejecting (optional):"); if (r === null) return; rejectCorrectionMutation.mutate({ id: req.id, reason: r || undefined }); }} disabled={rejectCorrectionMutation.isPending}><X className="h-4 w-4 mr-1" /> Reject</Button>
+                    </div>
+                  ) : (
+                    <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30 shrink-0">Awaiting admin</Badge>
+                  )}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {po.paymentRequests && po.paymentRequests.length > 0 && (
         <Card className="bg-card border-border">
           <CardHeader className="pb-2">

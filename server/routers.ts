@@ -43,6 +43,7 @@ import type {
   PurchaseOrderItem,
   PoPayment,
   PoPaymentRequest,
+  PoDeliveryRequest,
   Quotation,
   QuotationItem,
   DeliveryReceipt,
@@ -187,6 +188,89 @@ function deriveDeliveryStatus(items: PurchaseOrderItem[]): "not_delivered" | "pa
   if (!anyReceived) return "not_delivered";
   const allReceived = items.every(i => (i.receivedQuantity ?? 0) >= (i.quantity ?? 0));
   return allReceived ? "fully_delivered" : "partially_delivered";
+}
+
+/**
+ * Correct how much of a PO has been received (fix/undo a wrong "Receive
+ * Delivery"). `targets` sets each line's NEW cumulative received quantity;
+ * inventory is reconciled by the delta vs. the current received amount — a
+ * reduction writes a reversing stock_out, an increase a stock_in — then the
+ * line's receivedQuantity is set and the PO delivery status re-derived. Each
+ * target is clamped to [0, ordered]. Returns a summary of what changed.
+ */
+async function applyDeliveryCorrection(
+  poId: number,
+  targets: { poItemId: number; requestedReceived: number }[],
+  actorId: number,
+  actorName: string,
+): Promise<{ adjustedLines: number; netUnits: number; deliveryStatus: string }> {
+  const po = await fsGetById<PurchaseOrder>("purchase_orders", poId);
+  if (!po) throw new Error("Purchase order not found");
+  const items = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", poId]] });
+  const byId = new Map(items.map(i => [i.id, i]));
+  const targetById = new Map(targets.map(t => [t.poItemId, t]));
+  const now = new Date();
+  let adjustedLines = 0;
+  let netUnits = 0;
+
+  for (const it of items) {
+    const t = targetById.get(it.id);
+    if (!t) continue;
+    const ordered = it.quantity ?? 0;
+    const current = it.receivedQuantity ?? 0;
+    const target = Math.max(0, Math.min(Math.floor(t.requestedReceived), ordered));
+    const delta = target - current; // >0 stock more, <0 remove stock
+    if (delta === 0) continue;
+
+    if (it.itemId) {
+      const txnId = await fsAllocateIds("stock_transactions");
+      const auditId = await fsAllocateIds("inventory_audit_log");
+      const type = delta > 0 ? "stock_in" : "stock_out";
+      const qtyAbs = Math.abs(delta);
+      await fdb().runTransaction(async (tx) => {
+        const itemRef = fdb().collection("inventory_items").doc(String(it.itemId));
+        const snap = await tx.get(itemRef);
+        if (!snap.exists) return; // inventory item gone — still adjust the PO line below
+        const inv = snap.data() as InventoryItem;
+        const prevStock = inv.stockOnHand ?? 0;
+        const newStock = prevStock + delta;
+        tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+          id: txnId, itemId: it.itemId, type, quantity: qtyAbs,
+          reference: po.poNumber, purpose: "Purchase Order Receipt Correction", purposeOptionId: null,
+          purposeRefId: poId, purposeRefName: po.poNumber,
+          accountId: null, accountName: null, contactId: null, contactName: null,
+          notes: `Correction on PO ${po.poNumber}: received ${current} → ${target}`,
+          createdBy: actorId, createdByName: actorName || "Unknown", createdAt: now,
+        });
+        tx.set(itemRef, { stockOnHand: newStock, updatedAt: now }, { merge: true });
+        tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+          id: auditId, itemId: it.itemId, itemName: inv.name || null, itemSku: inv.sku || null,
+          transactionType: type, quantity: qtyAbs, previousStock: prevStock, newStock,
+          sourceLocation: type === "stock_out" ? (inv.warehouseLocation || null) : null,
+          destinationLocation: type === "stock_in" ? (inv.warehouseLocation || null) : null,
+          reference: po.poNumber, purpose: `Purchase Order Receipt Correction (${po.poNumber})`, notes: null,
+          performedBy: actorId, performedByName: actorName || "Unknown", createdAt: now,
+        });
+      });
+    }
+    await fsUpdateOne("purchase_order_items", it.id, { receivedQuantity: target });
+    it.receivedQuantity = target; // keep local copy in sync for status derivation
+    adjustedLines++;
+    netUnits += delta;
+  }
+
+  const newStatus = deriveDeliveryStatus(items);
+  const poUpdates: Record<string, unknown> = { deliveryStatus: newStatus };
+  poUpdates.deliveredAt = newStatus === "fully_delivered" ? (po.deliveredAt ?? now) : null;
+  await fsUpdateOne("purchase_orders", poId, poUpdates);
+  if (newStatus !== po.deliveryStatus) {
+    await fsInsertOne("po_status_history", {
+      purchaseOrderId: poId, type: "delivery", status: newStatus,
+      eventDate: now, changedBy: actorId, changedByName: actorName || "Unknown",
+    });
+  }
+  await fsAudit(actorId, actorName, "correct", "purchase_order", poId, `Corrected received quantities on PO ${po.poNumber}: ${adjustedLines} line(s), net ${netUnits} unit(s); delivery status now ${newStatus}`);
+  return { adjustedLines, netUnits, deliveryStatus: newStatus };
 }
 
 export const appRouter = router({
@@ -1453,17 +1537,19 @@ export const appRouter = router({
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
       const po = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       if (!po) throw new Error("Purchase order not found");
-      const [items, payments, statusHistory, allPaymentRequests] = await Promise.all([
+      const [items, payments, statusHistory, allPaymentRequests, allDeliveryRequests] = await Promise.all([
         fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<{ id: number; purchaseOrderId: number; type: string; status: string; eventDate: Date; changedBy: number; changedByName: string; createdAt: Date }>("po_status_history", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPaymentRequest>("po_payment_requests", { where: [["purchaseOrderId", "==", input.id]] }),
+        fsListAll<PoDeliveryRequest>("po_delivery_requests", { where: [["purchaseOrderId", "==", input.id]] }),
       ]);
       payments.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       statusHistory.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
-      // Only pending requests matter for the payments panel (badges + approvals).
+      // Only pending requests matter for the panels (badges + approvals).
       const paymentRequests = allPaymentRequests.filter(r => r.status === "pending");
-      return { ...po, items, payments, statusHistory, paymentRequests };
+      const deliveryRequests = allDeliveryRequests.filter(r => r.status === "pending");
+      return { ...po, items, payments, statusHistory, paymentRequests, deliveryRequests };
     }),
 
     create: protectedProcedure.input(z.object({
@@ -1676,6 +1762,92 @@ export const appRouter = router({
       }
       await fsAudit(ctx.user.id, ctx.user.name, "receive", "purchase_order", input.purchaseOrderId, `Received delivery on PO ${po.poNumber}: stocked ${stockedUnits} unit(s) across ${stockedLines} item(s); delivery status now ${newStatus}`);
       return { success: true, stockedLines, stockedUnits, deliveryStatus: newStatus };
+    }),
+
+    // Admin: correct/undo received quantities directly. `lines` give each PO
+    // item's NEW cumulative received amount; inventory is reconciled by the
+    // delta (a reduction removes the wrongly-added stock).
+    correctDelivery: adminProcedure.input(z.object({
+      purchaseOrderId: z.number(),
+      lines: z.array(z.object({ poItemId: z.number(), receivedQuantity: z.number().min(0) })).min(1),
+    })).mutation(async ({ input, ctx }) => {
+      const result = await applyDeliveryCorrection(
+        input.purchaseOrderId,
+        input.lines.map(l => ({ poItemId: l.poItemId, requestedReceived: l.receivedQuantity })),
+        ctx.user.id, ctx.user.name || "Admin",
+      );
+      return { success: true, ...result };
+    }),
+
+    // Sub-admin: request a received-quantity correction; an admin must approve.
+    requestDeliveryCorrection: protectedProcedure.input(z.object({
+      purchaseOrderId: z.number(),
+      reason: z.string().optional(),
+      lines: z.array(z.object({ poItemId: z.number(), requestedReceived: z.number().min(0) })).min(1),
+    })).mutation(async ({ input, ctx }) => {
+      const po = await fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId);
+      if (!po) throw new Error("Purchase order not found");
+      const existing = await fsListAll<PoDeliveryRequest>("po_delivery_requests", { where: [["purchaseOrderId", "==", input.purchaseOrderId], ["status", "==", "pending"]] });
+      if (existing.length > 0) throw new Error("There is already a pending delivery correction on this PO");
+      const items = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] });
+      const byId = new Map(items.map(i => [i.id, i]));
+      const lines = input.lines
+        .filter(l => byId.has(l.poItemId))
+        .map(l => {
+          const it = byId.get(l.poItemId)!;
+          const ordered = it.quantity ?? 0;
+          return {
+            poItemId: l.poItemId,
+            itemName: it.itemName ?? null,
+            currentReceived: it.receivedQuantity ?? 0,
+            requestedReceived: Math.max(0, Math.min(Math.floor(l.requestedReceived), ordered)),
+          };
+        })
+        .filter(l => l.requestedReceived !== l.currentReceived);
+      if (lines.length === 0) throw new Error("No changes to request");
+      const id = await fsInsertOne("po_delivery_requests", {
+        purchaseOrderId: input.purchaseOrderId,
+        poNumber: po.poNumber ?? null,
+        lines,
+        reason: input.reason ?? null,
+        status: "pending",
+        requestedBy: ctx.user.id,
+        requestedByName: ctx.user.name || "Unknown",
+        decidedBy: null, decidedByName: null, decidedAt: null, rejectionReason: null,
+      });
+      const admins = (await listUsersRaw()).filter(u => u.role === "admin");
+      await Promise.all(admins.map(a => fsInsertOne("notifications", {
+        userId: a.id, type: "po_delivery_correction_request",
+        message: `${ctx.user.name || "A sub-admin"} requested a delivery correction on PO ${po.poNumber}`,
+        link: `/purchase-orders/${input.purchaseOrderId}`, entityId: input.purchaseOrderId, read: false,
+      })));
+      await fsAudit(ctx.user.id, ctx.user.name, "request", "po_delivery", input.purchaseOrderId, `Requested delivery correction on PO ${po.poNumber} (${lines.length} line(s))`);
+      return { success: true, id };
+    }),
+
+    // Admin: approve a delivery correction (applies it, reconciling inventory).
+    approveDeliveryCorrection: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoDeliveryRequest>("po_delivery_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      const result = await applyDeliveryCorrection(
+        req.purchaseOrderId,
+        (req.lines ?? []).map(l => ({ poItemId: l.poItemId, requestedReceived: l.requestedReceived })),
+        ctx.user.id, ctx.user.name || "Admin",
+      );
+      await fsUpdateOne("po_delivery_requests", input.id, { status: "approved", decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_delivery_correction_approved", message: `Your delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} was approved.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "po_delivery", req.purchaseOrderId, `Approved delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`}: ${result.adjustedLines} line(s), net ${result.netUnits} unit(s)`);
+      return { success: true, ...result };
+    }),
+
+    // Admin: reject a delivery correction request.
+    rejectDeliveryCorrection: adminProcedure.input(z.object({ id: z.number(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoDeliveryRequest>("po_delivery_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      await fsUpdateOne("po_delivery_requests", input.id, { status: "rejected", rejectionReason: input.reason ?? null, decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_delivery_correction_rejected", message: `Your delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} was rejected.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "po_delivery", req.purchaseOrderId, `Rejected delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`}`);
+      return { success: true };
     }),
 
     addPayment: protectedProcedure.input(z.object({
