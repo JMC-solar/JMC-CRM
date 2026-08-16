@@ -1557,6 +1557,8 @@ export const appRouter = router({
       supplierId: z.number().optional(),
       notes: z.string().optional(),
       orderedAt: z.string().optional(),
+      currency: z.enum(["PHP", "USD", "CNY"]).default("PHP"),
+      exchangeRate: z.string().optional(),
       vatEnabled: z.boolean().default(false),
       vatRate: z.string().optional(),
       discountType: z.enum(["none", "percentage", "fixed"]).default("none"),
@@ -1600,6 +1602,8 @@ export const appRouter = router({
         status: "draft",
         deliveryStatus: "not_delivered",
         paymentStatus: "unpaid",
+        currency: input.currency,
+        exchangeRate: input.currency === "PHP" ? null : (input.exchangeRate || null),
         totalAmount: money(totalAmount),
         paidAmount: "0",
         vatEnabled: input.vatEnabled ? 1 : 0,
@@ -1626,7 +1630,7 @@ export const appRouter = router({
         lineTotal: item.lineTotal,
         receivedQuantity: 0,
       })));
-      await fsAudit(ctx.user.id, ctx.user.name, "create", "purchase_order", poId, `Created PO: ${poNumber} for ${input.supplier} with ${input.items.length} items, total ₱${totalAmount.toLocaleString()}`);
+      await fsAudit(ctx.user.id, ctx.user.name, "create", "purchase_order", poId, `Created PO: ${poNumber} for ${input.supplier} with ${input.items.length} items, total ${input.currency} ${totalAmount.toLocaleString()}`);
       return { success: true, poId, poNumber };
     }),
 
@@ -1636,6 +1640,8 @@ export const appRouter = router({
       deliveryStatus: z.string().optional(),
       paymentStatus: z.string().optional(),
       notes: z.string().optional(),
+      currency: z.enum(["PHP", "USD", "CNY"]).optional(),
+      exchangeRate: z.string().optional(),
       vatEnabled: z.boolean().optional(),
       vatRate: z.string().optional(),
       discountType: z.enum(["none", "percentage", "fixed"]).optional(),
@@ -1681,6 +1687,11 @@ export const appRouter = router({
       }
       if (input.paymentStatus) updates.paymentStatus = input.paymentStatus;
       if (input.notes !== undefined) updates.notes = input.notes;
+      if (input.currency !== undefined) {
+        updates.currency = input.currency;
+        if (input.currency === "PHP") updates.exchangeRate = null;
+      }
+      if (input.exchangeRate !== undefined) updates.exchangeRate = input.exchangeRate || null;
       if (input.vatEnabled !== undefined) updates.vatEnabled = input.vatEnabled ? 1 : 0;
       if (input.vatRate !== undefined) updates.vatRate = input.vatRate;
       if (input.discountType !== undefined) updates.discountType = input.discountType;
@@ -1858,28 +1869,46 @@ export const appRouter = router({
       reference: z.string().optional(),
       notes: z.string().optional(),
     })).mutation(async ({ input, ctx }) => {
+      // Stamp the payment with the PO's currency so it's self-describing.
+      const poForCurrency = await fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId);
+      const poCurrency = poForCurrency?.currency ?? "PHP";
       await fsInsertOne("po_payments", {
         purchaseOrderId: input.purchaseOrderId,
         amount: input.amount,
+        currency: poCurrency,
         paymentDate: new Date(input.paymentDate),
         paymentMethod: input.paymentMethod ?? null,
         reference: input.reference ?? null,
         notes: input.notes ?? null,
         createdBy: ctx.user.id,
       });
-      // Recalculate paid amount
-      const [payments, po] = await Promise.all([
-        fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] }),
-        fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId),
-      ]);
+      // Recalculate paid amount (all payments share the PO's currency)
+      const payments = await fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] });
       const paidAmount = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
-      const totalAmount = parseFloat(po?.totalAmount || "0");
+      const totalAmount = parseFloat(poForCurrency?.totalAmount || "0");
       let paymentStatus: "unpaid" | "partially_paid" | "paid" = "unpaid";
       if (paidAmount >= totalAmount && totalAmount > 0) paymentStatus = "paid";
       else if (paidAmount > 0) paymentStatus = "partially_paid";
       await fsUpdateOne("purchase_orders", input.purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
-      await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ₱${input.amount} recorded for PO #${input.purchaseOrderId}. Method: ${input.paymentMethod || 'N/A'}. Ref: ${input.reference || 'N/A'}`);
+      await fsAudit(ctx.user.id, ctx.user.name, "payment", "purchase_order", input.purchaseOrderId, `Payment of ${poCurrency} ${input.amount} recorded for PO #${input.purchaseOrderId}. Method: ${input.paymentMethod || 'N/A'}. Ref: ${input.reference || 'N/A'}`);
       return { success: true };
+    }),
+
+    // Look up today's exchange rate of 1 unit of `from` in PHP (for foreign POs).
+    // Uses a free, keyless public feed; returns rate=null on any failure so the
+    // UI can fall back to a manual entry. PHP → 1 (no conversion).
+    getExchangeRate: protectedProcedure.input(z.object({ from: z.enum(["PHP", "USD", "CNY"]) })).query(async ({ input }) => {
+      if (input.from === "PHP") return { rate: 1, asOf: null as string | null };
+      try {
+        const res = await fetch(`https://open.er-api.com/v6/latest/${input.from}`);
+        if (!res.ok) return { rate: null as number | null, asOf: null as string | null };
+        const data = await res.json() as { rates?: Record<string, number>; time_last_update_utc?: string };
+        const rate = data?.rates?.PHP;
+        if (typeof rate !== "number" || !isFinite(rate)) return { rate: null as number | null, asOf: null as string | null };
+        return { rate, asOf: data?.time_last_update_utc ?? null };
+      } catch {
+        return { rate: null as number | null, asOf: null as string | null };
+      }
     }),
 
     // ----- Payment corrections: admins act directly; everyone else must request -----

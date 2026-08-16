@@ -180,6 +180,12 @@ export interface PurchaseOrder {
   status: "draft" | "sent" | "received" | "cancelled";
   deliveryStatus: "not_delivered" | "partially_delivered" | "fully_delivered";
   paymentStatus: "unpaid" | "partially_paid" | "paid";
+  // Currency this PO (and its payments) are denominated in. Absent = "PHP" for
+  // records created before multi-currency. exchangeRate = value of 1 unit of
+  // `currency` in PHP at order time (null/"1" for PHP), captured so the peso
+  // equivalent stays fixed as market rates move.
+  currency?: "PHP" | "USD" | "CNY";
+  exchangeRate?: string | null;
   totalAmount: string | null;
   paidAmount: string | null;
   vatEnabled: number | null;
@@ -217,6 +223,8 @@ export interface PoPayment {
   id: number;
   purchaseOrderId: number;
   amount: string;
+  // Currency of this payment; mirrors the PO's currency (absent = "PHP").
+  currency?: "PHP" | "USD" | "CNY";
   paymentDate: Date;
   paymentMethod: string | null;
   reference: string | null;

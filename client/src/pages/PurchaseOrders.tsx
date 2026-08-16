@@ -8,6 +8,7 @@ import { Plus, Search, Printer } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import PaginationControls from "@/components/PaginationControls";
+import { currencySymbol } from "@/lib/utils";
 
 const deliveryStatusColors: Record<string, string> = {
   not_delivered: "bg-gray-500/20 text-gray-400 border-gray-500/30",
@@ -139,7 +140,10 @@ export default function PurchaseOrders() {
                       <td className="p-4"><Badge variant="outline" className={statusColors[po.status]}>{statusLabels[po.status] ?? po.status}</Badge></td>
                       <td className="p-4"><Badge variant="outline" className={deliveryStatusColors[po.deliveryStatus]}>{deliveryStatusLabels[po.deliveryStatus]}</Badge></td>
                       <td className="p-4"><Badge variant="outline" className={paymentStatusColors[po.paymentStatus]}>{paymentStatusLabels[po.paymentStatus]}</Badge></td>
-                      <td className="p-4 text-foreground">{po.totalAmount ? `₱${Number(po.totalAmount).toLocaleString()}` : "-"}</td>
+                      <td className="p-4 text-foreground">
+                        {po.totalAmount ? `${currencySymbol(po.currency)}${Number(po.totalAmount).toLocaleString()}` : "-"}
+                        {po.currency && po.currency !== "PHP" && <span className="ml-1 text-xs text-blue-400">{po.currency}</span>}
+                      </td>
                       <td className="p-4 text-sm text-muted-foreground">{new Date(po.createdAt).toLocaleDateString()}</td>
                       <td className="p-4">
                         <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); window.open(`/api/purchase-orders/${po.id}/pdf`, '_blank'); }} title="Print PO">

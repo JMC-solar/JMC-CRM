@@ -12,7 +12,7 @@ import { trpc } from "@/lib/trpc";
 import { ArrowLeft, ChevronsUpDown, Check, Plus, Trash2, AlertTriangle } from "lucide-react";
 import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+import { cn, currencySymbol, formatMoney, CURRENCY_OPTIONS } from "@/lib/utils";
 import { useLocation } from "wouter";
 
 interface LineItem {
@@ -49,6 +49,10 @@ export default function PurchaseOrderCreate() {
   const [vatRate, setVatRate] = useState("12");
   const [discountType, setDiscountType] = useState<"none" | "percentage" | "fixed">("none");
   const [discountValue, setDiscountValue] = useState("");
+  const [currency, setCurrency] = useState<"PHP" | "USD" | "CNY">("PHP");
+  const [exchangeRate, setExchangeRate] = useState(""); // 1 unit of `currency` in PHP
+  const [rateLoading, setRateLoading] = useState(false);
+  const [rateAsOf, setRateAsOf] = useState<string | null>(null);
   const [priceUpdateDialog, setPriceUpdateDialog] = useState(false);
   const [priceUpdateItems, setPriceUpdateItems] = useState<PriceUpdateItem[]>([]);
   const [createdPOData, setCreatedPOData] = useState<{ poId: number; poNumber: string } | null>(null);
@@ -76,6 +80,15 @@ export default function PurchaseOrderCreate() {
 
   const createMutation = trpc.purchaseOrders.create.useMutation({
     onSuccess: (data) => {
+      // Foreign-currency POs: skip the master/supplier price sync entirely —
+      // those stored prices are in ₱, so a USD/CNY unit price must not overwrite them.
+      if (currency !== "PHP") {
+        setCreatedPOData(data);
+        toast.success(`Purchase order ${data.poNumber} created successfully`);
+        utils.purchaseOrders.list.invalidate();
+        navigate("/purchase-orders");
+        return;
+      }
       // Check if any line items have prices different from item master
       const itemsWithDifferentPrices: PriceUpdateItem[] = [];
       for (const li of lineItems) {
@@ -222,10 +235,38 @@ export default function PurchaseOrderCreate() {
   const vatAmount = vatEnabled ? afterDiscount * (parseFloat(vatRate || "12") / 100) : 0;
   const totalAmount = afterDiscount + vatAmount;
 
+  // Look up today's rate (1 unit of `cur` in ₱) and pre-fill it; leaves the
+  // field editable so a bank/contract rate can override. PHP needs no rate.
+  const fetchRate = async (cur: "PHP" | "USD" | "CNY") => {
+    if (cur === "PHP") { setExchangeRate(""); setRateAsOf(null); return; }
+    setRateLoading(true);
+    try {
+      const r = await utils.purchaseOrders.getExchangeRate.fetch({ from: cur });
+      if (r?.rate) { setExchangeRate(String(Number(r.rate.toFixed(4)))); setRateAsOf(r.asOf ?? null); }
+      else toast.message("Couldn't fetch today's rate — please enter it manually.");
+    } catch {
+      toast.message("Couldn't fetch today's rate — please enter it manually.");
+    } finally {
+      setRateLoading(false);
+    }
+  };
+
+  const onCurrencyChange = (cur: "PHP" | "USD" | "CNY") => {
+    setCurrency(cur);
+    fetchRate(cur);
+  };
+
+  const phpEquivalent = currency !== "PHP" && parseFloat(exchangeRate || "0") > 0
+    ? totalAmount * parseFloat(exchangeRate) : null;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedSupplier) {
       toast.error("Please select a supplier");
+      return;
+    }
+    if (currency !== "PHP" && !(parseFloat(exchangeRate || "0") > 0)) {
+      toast.error("Please enter the ₱ exchange rate for this currency.");
       return;
     }
     if (lineItems.length === 0) {
@@ -237,6 +278,8 @@ export default function PurchaseOrderCreate() {
       supplierId: selectedSupplier.id,
       notes: notes || undefined,
       orderedAt: orderedAt || undefined,
+      currency,
+      exchangeRate: currency !== "PHP" ? exchangeRate : undefined,
       vatEnabled,
       vatRate: vatRate || "12",
       discountType,
@@ -313,6 +356,38 @@ export default function PurchaseOrderCreate() {
                   <Label>Order Date</Label>
                   <Input type="date" value={orderedAt} onChange={(e) => setOrderedAt(e.target.value)} className="bg-input border-border" />
                 </div>
+                <div>
+                  <Label>Currency</Label>
+                  <select
+                    value={currency}
+                    onChange={(e) => onCurrencyChange(e.target.value as "PHP" | "USD" | "CNY")}
+                    className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground"
+                  >
+                    {CURRENCY_OPTIONS.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+                  </select>
+                  <p className="text-xs text-muted-foreground mt-1">For suppliers billing in USD or CNY. Prices you enter below will be in this currency.</p>
+                </div>
+                {currency !== "PHP" && (
+                  <div>
+                    <Label>Exchange rate — 1 {currency} = ₱ *</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number" step="0.0001" min="0"
+                        value={exchangeRate}
+                        onChange={(e) => { setExchangeRate(e.target.value); setRateAsOf(null); }}
+                        placeholder={rateLoading ? "Fetching today's rate…" : "e.g. 58.50"}
+                        className="bg-input border-border"
+                      />
+                      <Button type="button" variant="outline" className="border-border shrink-0" onClick={() => fetchRate(currency)} disabled={rateLoading}>
+                        {rateLoading ? "…" : "Get rate"}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {rateAsOf ? `Auto-filled from today's market rate (${rateAsOf}). ` : "Auto-filled when you pick a currency. "}
+                      You can edit it to match your bank's rate.
+                    </p>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -423,7 +498,7 @@ export default function PurchaseOrderCreate() {
                             </div>
                           </td>
                           <td className="p-3 text-sm font-medium text-foreground">
-                            ₱{(item.quantity * parseFloat(item.unitPrice || "0")).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            {currencySymbol(currency)}{(item.quantity * parseFloat(item.unitPrice || "0")).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                           </td>
                           <td className="p-3">
                             <Button type="button" variant="ghost" size="sm" onClick={() => removeLineItem(index)}>
@@ -436,7 +511,7 @@ export default function PurchaseOrderCreate() {
                     <tfoot>
                       <tr className="border-t border-border">
                         <td colSpan={5} className="p-3 text-right text-sm text-muted-foreground">Subtotal:</td>
-                        <td className="p-3 font-medium text-foreground">₱{subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="p-3 font-medium text-foreground">{currencySymbol(currency)}{subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         <td></td>
                       </tr>
                       {discountAmount > 0 && (
@@ -444,22 +519,29 @@ export default function PurchaseOrderCreate() {
                           <td colSpan={5} className="p-3 text-right text-sm text-muted-foreground">
                             Discount ({discountType === "percentage" ? `${discountValue}%` : "Fixed"}):
                           </td>
-                          <td className="p-3 font-medium text-red-400">-₱{discountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="p-3 font-medium text-red-400">-{currencySymbol(currency)}{discountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                           <td></td>
                         </tr>
                       )}
                       {vatEnabled && (
                         <tr>
                           <td colSpan={5} className="p-3 text-right text-sm text-muted-foreground">VAT ({vatRate}%):</td>
-                          <td className="p-3 font-medium text-foreground">₱{vatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td className="p-3 font-medium text-foreground">{currencySymbol(currency)}{vatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                           <td></td>
                         </tr>
                       )}
                       <tr className="border-t border-border">
                         <td colSpan={5} className="p-3 text-right font-medium text-foreground">Grand Total:</td>
-                        <td className="p-3 font-bold text-foreground text-lg">₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="p-3 font-bold text-foreground text-lg">{currencySymbol(currency)}{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         <td></td>
                       </tr>
+                      {phpEquivalent !== null && (
+                        <tr>
+                          <td colSpan={5} className="p-3 text-right text-xs text-muted-foreground">≈ in Pesos (1 {currency} = ₱{exchangeRate}):</td>
+                          <td className="p-3 text-sm font-medium text-blue-400">{formatMoney(phpEquivalent, "PHP")}</td>
+                          <td></td>
+                        </tr>
+                      )}
                     </tfoot>
                   </table>
                 </div>
@@ -492,12 +574,12 @@ export default function PurchaseOrderCreate() {
                     <select value={discountType} onChange={(e) => setDiscountType(e.target.value as any)} className="mt-1 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
                       <option value="none">No Discount</option>
                       <option value="percentage">Percentage (%)</option>
-                      <option value="fixed">Fixed Amount (₱)</option>
+                      <option value="fixed">Fixed Amount ({currencySymbol(currency)})</option>
                     </select>
                   </div>
                   {discountType !== "none" && (
                     <div>
-                      <Label className="text-sm">{discountType === "percentage" ? "Discount %" : "Discount Amount (₱)"}</Label>
+                      <Label className="text-sm">{discountType === "percentage" ? "Discount %" : `Discount Amount (${currencySymbol(currency)})`}</Label>
                       <Input type="number" step="0.01" value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} className="bg-input border-border w-40 mt-1" placeholder={discountType === "percentage" ? "e.g. 5" : "e.g. 500"} />
                     </div>
                   )}

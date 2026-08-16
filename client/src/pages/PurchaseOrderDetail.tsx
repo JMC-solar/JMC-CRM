@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { useLocation, useParams } from "wouter";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { confirm } from "@/lib/confirm";
+import { currencySymbol, formatMoney } from "@/lib/utils";
 
 const deliveryStatusColors: Record<string, string> = {
   not_delivered: "bg-gray-500/20 text-gray-400 border-gray-500/30",
@@ -154,7 +155,7 @@ export default function PurchaseOrderDetail() {
 
   const handleDeletePayment = async (payment: any) => {
     if (isAdmin) {
-      if (await confirm(`Delete this payment of ₱${Number(payment.amount).toLocaleString()}? The PO totals will be recalculated.`)) {
+      if (await confirm(`Delete this payment of ${currencySymbol(po?.currency)}${Number(payment.amount).toLocaleString()}? The PO totals will be recalculated.`)) {
         deletePaymentMutation.mutate({ paymentId: payment.id });
       }
     } else {
@@ -291,6 +292,12 @@ export default function PurchaseOrderDetail() {
   const totalPaid = parseFloat(po.paidAmount || "0");
   const totalAmount = parseFloat(po.totalAmount || "0");
   const balance = totalAmount - totalPaid;
+  // Currency of this PO (all its amounts + payments share it). `poRate` = value
+  // of 1 unit in ₱, captured at order time; used to show the peso equivalent.
+  const cur = po.currency || "PHP";
+  const sym = currencySymbol(cur);
+  const poRate = parseFloat(po.exchangeRate || "0");
+  const isForeign = cur !== "PHP" && poRate > 0;
   // VAT/Discount calculations for display
   const poSubtotal = po.items?.reduce((sum: number, item: any) => sum + parseFloat(item.lineTotal || "0"), 0) || 0;
   const poVatEnabled = po.vatEnabled === 1 || (po.vatEnabled as any) === true;
@@ -317,7 +324,11 @@ export default function PurchaseOrderDetail() {
             <ArrowLeft className="h-4 w-4 mr-2" /> Back
           </Button>
           <div>
-            <h1 className="text-2xl font-bold text-foreground font-mono">{po.poNumber}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-foreground font-mono">{po.poNumber}</h1>
+              {isForeign && <Badge variant="outline" className="bg-blue-500/20 text-blue-400 border-blue-500/30">{cur} · 1 {cur} = ₱{po.exchangeRate}</Badge>}
+              {cur === "PHP" && <Badge variant="outline" className="bg-gray-500/20 text-gray-300 border-gray-500/30">PHP</Badge>}
+            </div>
             <p className="text-muted-foreground mt-1">Supplier: <span className="text-foreground font-medium">{po.supplier}</span></p>
             {po.createdByName && <p className="text-muted-foreground text-sm mt-0.5">Prepared by: <span className="text-foreground">{po.createdByName}</span></p>}
           </div>
@@ -495,8 +506,8 @@ export default function PurchaseOrderDetail() {
               <DialogHeader><DialogTitle className="text-foreground">Record Payment</DialogTitle></DialogHeader>
               <form onSubmit={handleAddPayment} className="space-y-4">
                 <div>
-                  <Label>Amount (₱) *</Label>
-                  <Input name="amount" type="number" step="0.01" required className="bg-input border-border" placeholder={`Balance: ₱${balance.toLocaleString()}`} />
+                  <Label>Amount ({sym}) *{isForeign ? <span className="text-muted-foreground font-normal"> — in {cur}</span> : null}</Label>
+                  <Input name="amount" type="number" step="0.01" required className="bg-input border-border" placeholder={`Balance: ${sym}${balance.toLocaleString()}`} />
                 </div>
                 <div>
                   <Label>Payment Date *</Label>
@@ -559,8 +570,9 @@ export default function PurchaseOrderDetail() {
         <Card className="bg-card border-border">
           <CardContent className="p-4">
             <p className="text-xs text-muted-foreground mb-1">Balance</p>
-            <p className="text-lg font-bold text-foreground">₱{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
-            <p className="text-xs text-muted-foreground">of ₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+            <p className="text-lg font-bold text-foreground">{sym}{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+            <p className="text-xs text-muted-foreground">of {sym}{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
+            {isForeign && <p className="mt-1 text-xs text-blue-400">≈ {formatMoney(balance * poRate, "PHP")} left</p>}
           </CardContent>
         </Card>
       </div>
@@ -637,8 +649,8 @@ export default function PurchaseOrderDetail() {
                     <td className="p-4 text-sm text-foreground text-right">{ordered}</td>
                     <td className="p-4 text-sm text-right"><span className={received > 0 ? "text-green-400" : "text-muted-foreground"}>{received}</span></td>
                     <td className="p-4 text-sm text-right font-medium">{bal === 0 ? <span className="text-green-400">0</span> : <span className="text-yellow-400">{bal}</span>}</td>
-                    <td className="p-4 text-sm text-foreground text-right">₱{Number(item.unitPrice || 0).toLocaleString()}</td>
-                    <td className="p-4 text-sm font-medium text-foreground text-right">₱{Number(item.lineTotal || 0).toLocaleString()}</td>
+                    <td className="p-4 text-sm text-foreground text-right">{sym}{Number(item.unitPrice || 0).toLocaleString()}</td>
+                    <td className="p-4 text-sm font-medium text-foreground text-right">{sym}{Number(item.lineTotal || 0).toLocaleString()}</td>
                   </tr>
                   );
                 })}
@@ -646,26 +658,32 @@ export default function PurchaseOrderDetail() {
               <tfoot>
                 <tr className="border-t border-border">
                   <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">Subtotal:</td>
-                  <td className="p-4 text-right font-medium text-foreground">₱{poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                  <td className="p-4 text-right font-medium text-foreground">{sym}{poSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
                 {poDiscountAmount > 0 && (
                   <tr>
                     <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">
                       Discount ({poDiscountType === "percentage" ? `${poDiscountValue}%` : "Fixed"}):
                     </td>
-                    <td className="p-4 text-right font-medium text-red-400">-₱{poDiscountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td className="p-4 text-right font-medium text-red-400">-{sym}{poDiscountAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                   </tr>
                 )}
                 {poVatEnabled && (
                   <tr>
                     <td colSpan={8} className="p-4 text-right text-sm text-muted-foreground">VAT ({poVatRate}%):</td>
-                    <td className="p-4 text-right font-medium text-foreground">₱{poVatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td className="p-4 text-right font-medium text-foreground">{sym}{poVatAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                   </tr>
                 )}
                 <tr className="border-t border-border">
                   <td colSpan={8} className="p-4 text-right font-medium text-foreground">Grand Total:</td>
-                  <td className="p-4 text-right font-bold text-foreground text-lg">₱{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                  <td className="p-4 text-right font-bold text-foreground text-lg">{sym}{totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                 </tr>
+                {isForeign && (
+                  <tr>
+                    <td colSpan={8} className="p-4 text-right text-xs text-muted-foreground">≈ in Pesos (1 {cur} = ₱{po.exchangeRate}):</td>
+                    <td className="p-4 text-right text-sm font-medium text-blue-400">{formatMoney(totalAmount * poRate, "PHP")}</td>
+                  </tr>
+                )}
               </tfoot>
             </table>
           </div>
@@ -699,7 +717,7 @@ export default function PurchaseOrderDetail() {
                     return (
                     <tr key={payment.id} className="border-b border-border/50">
                       <td className="p-4 text-sm text-foreground">{new Date(payment.paymentDate).toLocaleDateString()}</td>
-                      <td className="p-4 font-medium text-foreground">₱{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      <td className="p-4 font-medium text-foreground">{currencySymbol(payment.currency || cur)}{Number(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.paymentMethod || "-"}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.reference || "-"}</td>
                       <td className="p-4 text-sm text-muted-foreground">{payment.notes || "-"}</td>
@@ -720,7 +738,7 @@ export default function PurchaseOrderDetail() {
                 <tfoot>
                   <tr className="border-t border-border">
                     <td className="p-4 font-medium text-foreground">Total Paid:</td>
-                    <td className="p-4 font-bold text-green-400">₱{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                    <td className="p-4 font-bold text-green-400">{sym}{totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                     <td colSpan={4}></td>
                   </tr>
                 </tfoot>
@@ -778,12 +796,12 @@ export default function PurchaseOrderDetail() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="text-sm">
                       <div className="font-medium text-foreground">
-                        {req.type === "delete" ? "Delete" : "Edit"} payment{target ? ` of ₱${Number(target.amount).toLocaleString()}` : ""}
+                        {req.type === "delete" ? "Delete" : "Edit"} payment{target ? ` of ${sym}${Number(target.amount).toLocaleString()}` : ""}
                       </div>
                       <div className="text-xs text-muted-foreground mt-0.5">Requested by {req.requestedByName || "Unknown"}</div>
                       {req.type === "edit" && (
                         <div className="text-xs text-muted-foreground mt-1">
-                          New: ₱{Number(req.proposedAmount || 0).toLocaleString()}
+                          New: {sym}{Number(req.proposedAmount || 0).toLocaleString()}
                           {req.proposedPaymentDate ? ` · ${new Date(req.proposedPaymentDate).toLocaleDateString()}` : ""}
                           {req.proposedPaymentMethod ? ` · ${req.proposedPaymentMethod}` : ""}
                           {req.proposedReference ? ` · ref ${req.proposedReference}` : ""}
@@ -814,7 +832,7 @@ export default function PurchaseOrderDetail() {
           {editingPayment && (
             <form onSubmit={handleEditSubmit} className="space-y-4">
               <div>
-                <Label>Amount (₱) *</Label>
+                <Label>Amount ({sym}) *</Label>
                 <Input name="amount" type="number" step="0.01" min="0" required defaultValue={editingPayment.amount} className="bg-input border-border" />
               </div>
               <div>
