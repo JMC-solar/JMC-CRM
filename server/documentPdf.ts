@@ -81,10 +81,15 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
         // All payments for the project this payment belongs to.
         allPayments = await listAll<ProjectPayment>("project_payments", { where: [["projectId", "==", payment.projectId]] });
 
-        // Saved Project Billing wins as the amount owed; else the project's own
-        // amount; else (nothing set) the linked quotation total takes over.
+        // Amount owed = the all-inclusive Total Project Price, matching the
+        // Project Monitor: a saved Project Billing already merges contract +
+        // quotation + extras, so it wins; otherwise contract + linked quotation
+        // (quotation adds on top; if no contract it stands alone). No billing? We
+        // synthesize summary lines so the itemized total equals the amount owed.
         const billings = await listAll<ProjectBilling>("project_billings", { where: [["projectId", "==", payment.projectId]] });
         const projBilling = billings[0];
+        const baseContract = Number(projectData?.totalProjectAmount || 0);
+        const quotationTotal = Number(quotationData?.totalAmount || 0);
         if (projBilling && Number(projBilling.total) > 0) {
           totalProjectAmount = Number(projBilling.total);
           billingItems = (projBilling.items || []).map((it: any) => {
@@ -93,8 +98,12 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
             const unitPrice = it.unitPrice != null ? Number(it.unitPrice) : amount;
             return { description: it.description, quantity, unitPrice, amount };
           });
-        } else if (totalProjectAmount === 0 && quotationData?.totalAmount) {
-          totalProjectAmount = Number(quotationData.totalAmount || 0);
+        } else {
+          totalProjectAmount = baseContract + quotationTotal;
+          const synth: { description: string; quantity: number; unitPrice: number; amount: number }[] = [];
+          if (baseContract > 0) synth.push({ description: "Project contract amount", quantity: 1, unitPrice: baseContract, amount: baseContract });
+          if (quotationTotal > 0) synth.push({ description: `Linked quotation${quotationData?.quoteNumber ? ` ${quotationData.quoteNumber}` : ""}`, quantity: 1, unitPrice: quotationTotal, amount: quotationTotal });
+          billingItems = synth;
         }
       }
     } else if (ack.type === "net_metering_payment") {
@@ -376,7 +385,7 @@ function generateAcknowledgementHtml(ack: any, context: {
 }) {
   const { projectData, quotationData, quotationItemsData, allPayments, totalProjectAmount, nmData } = context;
   // What the "amount owed" line is called depends on the receipt type.
-  const amountOwedLabel = nmData ? "Net Metering Billed" : "Total Project Amount";
+  const amountOwedLabel = nmData ? "Net Metering Billed" : "Total Project Price";
   // Prefer the saved Project Billing lines (they sum to the amount owed);
   // otherwise fall back to the linked quotation's items.
   const useBilling = !!(context.billingItems && context.billingItems.length > 0);
