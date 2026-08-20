@@ -104,6 +104,67 @@ function ItemsEditor({
   );
 }
 
+/** One editable expense row in the liquidation editor. */
+type LiqRow = { purposeOptionId: string; description: string; payee: string; spentDate: string; amount: string };
+const emptyLiqRow = (): LiqRow => ({ purposeOptionId: "", description: "", payee: "", spentDate: "", amount: "" });
+const liqRowsTotal = (rows: LiqRow[]) => rows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+
+/** Drop incomplete rows and convert to the shape submitLiquidation expects. */
+function buildLiqItems(rows: LiqRow[]) {
+  return rows
+    .filter(r => r.description.trim() && parseFloat(r.amount) > 0)
+    .map(r => ({
+      purposeOptionId: r.purposeOptionId ? parseInt(r.purposeOptionId) : null,
+      description: r.description.trim(),
+      payee: r.payee.trim() || undefined,
+      spentDate: r.spentDate || undefined,
+      amount: parseFloat(r.amount),
+    }));
+}
+
+/** Repeating "what the cash was actually spent on" rows. */
+function LiquidationEditor({ rows, setRows, purposeOptions }: { rows: LiqRow[]; setRows: (rows: LiqRow[]) => void; purposeOptions: any[] | undefined }) {
+  const update = (i: number, patch: Partial<LiqRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <div className="space-y-2">
+      <Label>Expenses *</Label>
+      {rows.map((row, i) => (
+        <div key={i} className="space-y-1 rounded-md border border-border p-2">
+          <div className="flex items-center gap-2">
+            <Input placeholder="What was it spent on?" value={row.description} onChange={(e) => update(i, { description: e.target.value })} className="min-w-0 flex-1 bg-input border-border" />
+            <Input type="number" min="0" step="0.01" placeholder="0.00" value={row.amount} onChange={(e) => update(i, { amount: e.target.value })} className="w-28 shrink-0 bg-input border-border" />
+            <Button type="button" variant="ghost" size="sm" className="shrink-0 text-muted-foreground hover:text-red-400" onClick={() => setRows(rows.filter((_, j) => j !== i))} disabled={rows.length === 1} title="Remove expense"><Trash2 className="h-4 w-4" /></Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <select value={row.purposeOptionId} onChange={(e) => update(i, { purposeOptionId: e.target.value })} className="min-w-0 flex-1 rounded-md border border-border bg-input px-2 py-1.5 text-xs text-muted-foreground">
+              <option value="">Purpose (optional)</option>
+              {purposeOptions?.map((o: any) => <option key={o.id} value={o.id}>{o.value}</option>)}
+            </select>
+            <Input placeholder="Payee (optional)" value={row.payee} onChange={(e) => update(i, { payee: e.target.value })} className="h-8 min-w-0 flex-1 bg-input border-border text-xs" />
+            <Input type="date" value={row.spentDate} onChange={(e) => update(i, { spentDate: e.target.value })} className="h-8 w-36 shrink-0 bg-input border-border text-xs" />
+          </div>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="sm" className="border-border" onClick={() => setRows([...rows, emptyLiqRow()])}>
+        <Plus className="mr-1 h-4 w-4" /> Add expense
+      </Button>
+    </div>
+  );
+}
+
+// Liquidation lifecycle for a request, from the receiver's side:
+//   "n/a"       — cash not yet received, nothing to account for
+//   "awaiting"  — received, nothing submitted yet (or sent back for correction)
+//   "submitted" — accounting submitted, waiting on an admin to verify
+//   "verified"  — admin signed off; the money is fully accounted for
+function liqStateOf(req: any): "n/a" | "awaiting" | "submitted" | "verified" {
+  if (!(req?.status === "approved" && req?.received)) return "n/a";
+  const s = req?.liquidation?.status;
+  if (s === "verified") return "verified";
+  if (s === "submitted") return "submitted";
+  return "awaiting";
+}
+
 // Sorts by the request's *attributed* month/year (not raw createdAt) — an old/backfilled
 // record tagged March belongs with March, regardless of when it was actually entered.
 // Ties within the same month/year break by monthSeq (entry order).
@@ -140,6 +201,10 @@ export default function CashRequests() {
   const [editItems, setEditItems] = useState<ItemRow[]>([emptyRow()]);
   const [editNotes, setEditNotes] = useState("");
   const [deletingRequest, setDeletingRequest] = useState<any>(null);
+  const [liquidating, setLiquidating] = useState<any>(null);
+  const [liqRows, setLiqRows] = useState<LiqRow[]>([emptyLiqRow()]);
+  const [liqReturned, setLiqReturned] = useState("");
+  const [liqNotes, setLiqNotes] = useState("");
 
   const { data: requests, isLoading } = trpc.cashRequests.list.useQuery();
   const sortedRequests = useMemo(() => (requests ? sortRequests(requests, sortMode) : requests), [requests, sortMode]);
@@ -153,6 +218,14 @@ export default function CashRequests() {
   const approvedCount = approvedThisYear.length;
   const approvedTotal = approvedThisYear.reduce((sum: number, r: any) => sum + Number(r.amount), 0);
   const { data: purposeOptions } = trpc.config.getOptions.useQuery({ category: "cash_request_purpose" });
+
+  // Received cash still waiting to be accounted for — the watchlist that keeps money honest.
+  const awaitingLiquidation = useMemo(
+    () => (requests ?? []).filter((r: any) => liqStateOf(r) === "awaiting"),
+    [requests]
+  );
+  const awaitingCount = awaitingLiquidation.length;
+  const awaitingTotal = awaitingLiquidation.reduce((sum: number, r: any) => sum + Number(r.amount), 0);
 
   // The id is reserved and the request written atomically server-side, only at
   // actual submit — never while just browsing a month — so no number is ever
@@ -181,6 +254,60 @@ export default function CashRequests() {
     onSuccess: () => { toast.success("Cash request deleted"); setDeletingRequest(null); utils.cashRequests.list.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+  const invalidateAll = () => { utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); };
+  const submitLiqMutation = trpc.cashRequests.submitLiquidation.useMutation({
+    onSuccess: () => { toast.success("Liquidation submitted for verification"); setLiquidating(null); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const verifyLiqMutation = trpc.cashRequests.verifyLiquidation.useMutation({
+    onSuccess: () => { toast.success("Liquidation verified"); setViewingRequest(null); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const rejectLiqMutation = trpc.cashRequests.rejectLiquidation.useMutation({
+    onSuccess: () => { toast.success("Sent back for correction"); setViewingRequest(null); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  // Received cash amount, spent, returned, and the resulting variance — recomputed
+  // live in the dialog so the person accounting always sees whether it balances.
+  const liqReceived = liquidating ? Number(liquidating.amount || 0) : 0;
+  const liqSpent = liqRowsTotal(liqRows);
+  const liqReturnedNum = parseFloat(liqReturned) || 0;
+  const liqOverspend = Math.max(0, liqSpent - liqReceived);
+  const liqUnaccounted = Math.max(0, liqReceived - liqSpent - liqReturnedNum);
+
+  const openLiquidate = (req: any) => {
+    setViewingRequest(null);
+    setLiquidating(req);
+    const liq = req.liquidation;
+    if (liq?.items?.length) {
+      setLiqRows(liq.items.map((it: any) => ({
+        purposeOptionId: String(it.purposeOptionId ?? ""),
+        description: it.description ?? "",
+        payee: it.payee ?? "",
+        spentDate: it.spentDate ? new Date(it.spentDate).toISOString().slice(0, 10) : "",
+        amount: String(it.amount ?? ""),
+      })));
+      setLiqReturned(liq.amountReturned != null && Number(liq.amountReturned) > 0 ? String(liq.amountReturned) : "");
+      setLiqNotes(liq.notes ?? "");
+    } else {
+      // Seed one row per requested purpose to make accounting quick.
+      const seeded = itemsOf(req).map((it: any) => ({ purposeOptionId: String(it.purposeOptionId ?? ""), description: it.purposeLabel ?? "", payee: "", spentDate: "", amount: "" }));
+      setLiqRows(seeded.length ? seeded : [emptyLiqRow()]);
+      setLiqReturned("");
+      setLiqNotes("");
+    }
+  };
+  const handleLiquidateSubmit = () => {
+    const items = buildLiqItems(liqRows);
+    if (items.length === 0) { toast.error("Add at least one expense with a description and amount"); return; }
+    submitLiqMutation.mutate({ id: liquidating.id, items, amountReturned: liqReturned ? liqReturnedNum : undefined, notes: liqNotes || undefined });
+  };
+  const sendBackLiquidation = (req: any) => {
+    const reason = window.prompt("Reason for sending this liquidation back (optional):");
+    if (reason === null) return; // cancelled
+    rejectLiqMutation.mutate({ id: req.id, reason: reason || undefined });
+  };
 
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -222,6 +349,21 @@ export default function CashRequests() {
       case "rejected": return <Badge className="bg-red-500/20 text-red-400 border-red-500/30"><XCircle className="h-3 w-3 mr-1" />Rejected</Badge>;
       default: return <Badge variant="outline">{status}</Badge>;
     }
+  };
+
+  // Second badge line describing how far along the money accounting is.
+  const liqBadge = (req: any) => {
+    const st = liqStateOf(req);
+    if (st === "n/a") return null;
+    if (st === "verified") return <Badge className="bg-green-500/20 text-green-400 border-green-500/30"><CheckCircle className="h-3 w-3 mr-1" />Liquidated</Badge>;
+    if (st === "submitted") return <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30"><Clock className="h-3 w-3 mr-1" />Liquidation submitted</Badge>;
+    const returned = req?.liquidation?.status === "rejected";
+    const days = req.receivedAt ? Math.floor((Date.now() - new Date(req.receivedAt).getTime()) / 86400000) : 0;
+    return (
+      <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">
+        <Clock className="h-3 w-3 mr-1" />{returned ? "Liquidation returned" : "Awaiting liquidation"}{!returned && days > 0 ? ` · ${days}d` : ""}
+      </Badge>
+    );
   };
 
   return (
@@ -284,7 +426,7 @@ export default function CashRequests() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card className="bg-card border-border">
           <CardContent className="pt-6">
             <div className="text-sm text-muted-foreground">Approved This Year</div>
@@ -295,6 +437,13 @@ export default function CashRequests() {
           <CardContent className="pt-6">
             <div className="text-sm text-muted-foreground">Total Approved Amount</div>
             <div className="text-2xl font-bold text-green-400 mt-1">{formatPHP(approvedTotal)}</div>
+          </CardContent>
+        </Card>
+        <Card className={awaitingCount > 0 ? "bg-card border-amber-500/40" : "bg-card border-border"}>
+          <CardContent className="pt-6">
+            <div className="text-sm text-muted-foreground">Awaiting Liquidation</div>
+            <div className={`text-2xl font-bold mt-1 ${awaitingCount > 0 ? "text-amber-400" : "text-foreground"}`}>{awaitingCount}</div>
+            {awaitingCount > 0 && <div className="text-xs text-muted-foreground mt-0.5">{formatPHP(awaitingTotal)} to account for</div>}
           </CardContent>
         </Card>
       </div>
@@ -339,7 +488,10 @@ export default function CashRequests() {
                     const canMarkReceived = req.status === "approved" && !req.received && (isSubAdmin || isAdmin);
                     const editable = canEdit(req);
                     const deletable = canDelete(req);
-                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable;
+                    const liqState = liqStateOf(req);
+                    const canLiquidate = liqState === "awaiting" && (isSubAdmin || isAdmin);
+                    const canVerifyLiq = liqState === "submitted" && isAdmin;
+                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable || canLiquidate || canVerifyLiq;
                     const entries = itemsOf(req);
                     return (
                       <tr
@@ -357,7 +509,12 @@ export default function CashRequests() {
                         </td>
                         <td className="p-4 text-sm font-medium tabular-nums text-foreground">{formatPHP(req.amount)}</td>
                         <td className="p-4 text-sm text-muted-foreground">{req.isOldRecord ? "Old" : "New"}</td>
-                        <td className="p-4">{statusBadge(req.status, req.received)}</td>
+                        <td className="p-4">
+                          <div className="flex flex-col items-start gap-1">
+                            {statusBadge(req.status, req.received)}
+                            {liqBadge(req)}
+                          </div>
+                        </td>
                         <td className="p-4 text-sm text-muted-foreground">{req.receivedByName || "-"}</td>
                         <td className="p-4 text-sm text-muted-foreground">{new Date(req.createdAt).toLocaleDateString()}</td>
                         <td className="p-4">
@@ -387,6 +544,21 @@ export default function CashRequests() {
                               <Button size="sm" variant="ghost" className="text-primary" onClick={() => receivedMutation.mutate({ id: req.id })} disabled={receivedMutation.isPending}>
                                 Mark Received
                               </Button>
+                            )}
+                            {canLiquidate && (
+                              <Button size="sm" variant="ghost" className="text-amber-400 hover:text-amber-300" onClick={() => openLiquidate(req)}>
+                                {req.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
+                              </Button>
+                            )}
+                            {canVerifyLiq && (
+                              <>
+                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => verifyLiqMutation.mutate({ id: req.id })} disabled={verifyLiqMutation.isPending} title="Verify liquidation">
+                                  <Check className="h-4 w-4" />
+                                </Button>
+                                <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => sendBackLiquidation(req)} disabled={rejectLiqMutation.isPending} title="Send back for correction">
+                                  <X className="h-4 w-4" />
+                                </Button>
+                              </>
                             )}
                             {!hasActions && (
                               <span className="text-xs text-muted-foreground">{req.decidedByName || "-"}</span>
@@ -452,6 +624,53 @@ export default function CashRequests() {
         </DialogContent>
       </Dialog>
 
+      {/* Liquidation — account for received cash (spent + returned), submitted for admin verification. */}
+      <Dialog open={!!liquidating} onOpenChange={(open) => { if (!open) setLiquidating(null); }}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[90vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Liquidate {liquidating?.id}</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Account for the {formatPHP(liqReceived)} received: list what it was actually spent on, and enter any leftover cash you returned. An admin then verifies it.
+              {liquidating?.liquidation?.status === "rejected" && liquidating?.liquidation?.rejectionReason && (
+                <span className="mt-1 block text-red-400">Sent back: {liquidating.liquidation.rejectionReason}</span>
+              )}
+            </p>
+
+            <LiquidationEditor rows={liqRows} setRows={setLiqRows} purposeOptions={purposeOptions} />
+
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-sm">Cash returned (leftover)</Label>
+              <Input type="number" min="0" step="0.01" placeholder="0.00" value={liqReturned} onChange={(e) => setLiqReturned(e.target.value)} className="w-32 bg-input border-border" />
+            </div>
+
+            {/* Live reconciliation so the total always ties out. */}
+            <div className="rounded-md border border-border p-3 text-sm space-y-1">
+              <div className="flex justify-between"><span className="text-muted-foreground">Cash received</span><span className="tabular-nums text-foreground">{formatPHP(liqReceived)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Total spent</span><span className="tabular-nums text-foreground">{formatPHP(liqSpent)}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Cash returned</span><span className="tabular-nums text-foreground">{formatPHP(liqReturnedNum)}</span></div>
+              <div className="flex justify-between border-t border-border pt-1 font-medium">
+                {liqOverspend > 0 ? (
+                  <><span className="text-red-400">Overspend (to reimburse)</span><span className="tabular-nums text-red-400">{formatPHP(liqOverspend)}</span></>
+                ) : liqUnaccounted > 0 ? (
+                  <><span className="text-amber-400">Unaccounted (still to explain)</span><span className="tabular-nums text-amber-400">{formatPHP(liqUnaccounted)}</span></>
+                ) : (
+                  <><span className="text-green-400">Balanced</span><span className="tabular-nums text-green-400">{formatPHP(0)}</span></>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <Label>Notes</Label>
+              <Textarea value={liqNotes} onChange={(e) => setLiqNotes(e.target.value)} className="bg-input border-border" placeholder="Anything the admin should know..." />
+            </div>
+
+            <Button className="w-full bg-primary text-primary-foreground" onClick={handleLiquidateSubmit} disabled={submitLiqMutation.isPending}>
+              {submitLiqMutation.isPending ? "Submitting..." : "Submit for Verification"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <DetailDialog
         open={!!viewingRequest}
         onOpenChange={(open) => !open && setViewingRequest(null)}
@@ -487,6 +706,20 @@ export default function CashRequests() {
               { label: "Rejection Reason", value: viewingRequest?.rejectionReason, full: true, hidden: !viewingRequest?.rejectionReason },
             ],
           },
+          ...(viewingRequest?.liquidation ? [{
+            title: "Liquidation",
+            fields: [
+              { label: "Status", value: viewingRequest.liquidation.status === "verified" ? "Verified ✓" : viewingRequest.liquidation.status === "rejected" ? "Sent back for correction" : "Submitted — awaiting verification" },
+              { label: "Total Spent", value: formatPHP(viewingRequest.liquidation.totalSpent) },
+              { label: "Cash Returned", value: formatPHP(viewingRequest.liquidation.amountReturned) },
+              { label: "Overspend (to reimburse)", value: formatPHP(viewingRequest.liquidation.overspend), hidden: !(Number(viewingRequest.liquidation.overspend) > 0) },
+              { label: "Unaccounted", value: formatPHP(viewingRequest.liquidation.unaccounted), hidden: !(Number(viewingRequest.liquidation.unaccounted) > 0) },
+              { label: "Expenses", full: true, value: (viewingRequest.liquidation.items || []).map((it: any) => `${it.description}${it.payee ? ` — ${it.payee}` : ""} · ${formatPHP(it.amount)}`).join("   |   ") },
+              { label: "Submitted By", value: viewingRequest.liquidation.submittedByName },
+              { label: "Verified By", value: viewingRequest.liquidation.verifiedByName, hidden: viewingRequest.liquidation.status !== "verified" },
+              { label: "Sent back", value: viewingRequest.liquidation.rejectionReason, full: true, hidden: viewingRequest.liquidation.status !== "rejected" || !viewingRequest.liquidation.rejectionReason },
+            ],
+          }] : []),
           {
             title: "Notes",
             fields: [{ label: "Notes", value: viewingRequest?.notes, full: true }],
@@ -500,6 +733,19 @@ export default function CashRequests() {
               </Button>
               <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: viewingRequest.id })} disabled={rejectMutation.isPending}>
                 <X className="h-4 w-4 mr-2" /> Reject
+              </Button>
+            </>
+          ) : viewingRequest && liqStateOf(viewingRequest) === "awaiting" && (isSubAdmin || isAdmin) ? (
+            <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => openLiquidate(viewingRequest)}>
+              {viewingRequest.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
+            </Button>
+          ) : viewingRequest && liqStateOf(viewingRequest) === "submitted" && isAdmin ? (
+            <>
+              <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => verifyLiqMutation.mutate({ id: viewingRequest.id })} disabled={verifyLiqMutation.isPending}>
+                <Check className="h-4 w-4 mr-2" /> Verify
+              </Button>
+              <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => sendBackLiquidation(viewingRequest)} disabled={rejectLiqMutation.isPending}>
+                <X className="h-4 w-4 mr-2" /> Send Back
               </Button>
             </>
           ) : undefined
