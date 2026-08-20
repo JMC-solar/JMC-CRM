@@ -60,6 +60,8 @@ import type {
   SpecialQuotation,
   CashRequest,
   CashRequestItem,
+  CashLiquidation,
+  CashLiquidationItem,
   Notification,
   RetailSale,
   RetailRemittance,
@@ -3980,6 +3982,116 @@ export const appRouter = router({
         message: `${ctx.user.name || 'Sub-admin'} received cash request ${input.id} (${data.purposeLabel}).`,
         link: "/cash-requests", entityId: input.id, read: false,
       })));
+      return { success: true };
+    }),
+
+    // Account for received cash: record what it was actually spent on (+ any
+    // returned), computing the variance. Anyone on the team may submit (mirrors
+    // who can receive); an admin then verifies. Blocked once verified.
+    submitLiquidation: protectedProcedure.input(z.object({
+      id: z.string(),
+      items: z.array(z.object({
+        purposeOptionId: z.number().nullable().optional(),
+        description: z.string().min(1),
+        payee: z.string().optional(),
+        spentDate: z.string().optional(),
+        amount: z.number().nonnegative(),
+      })).min(1),
+      amountReturned: z.number().nonnegative().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (data.status !== 'approved' || !data.received) throw new Error("Cash must be approved and received before it can be liquidated");
+      if (data.liquidation?.status === 'verified') throw new Error("This liquidation is already verified and locked");
+
+      // Resolve optional purpose labels for tagged lines.
+      const optIds = Array.from(new Set(input.items.map(i => i.purposeOptionId).filter((x): x is number => typeof x === 'number')));
+      const opts = await Promise.all(optIds.map(id => fsGetById<ConfigOption>("config_options", id)));
+      const optLabel = new Map(optIds.map((id, i) => [id, opts[i]?.value ?? null]));
+      const items: CashLiquidationItem[] = input.items.map(it => ({
+        purposeOptionId: it.purposeOptionId ?? null,
+        purposeLabel: it.purposeOptionId != null ? (optLabel.get(it.purposeOptionId) ?? null) : null,
+        description: it.description,
+        payee: it.payee ?? null,
+        spentDate: it.spentDate ? new Date(it.spentDate) : null,
+        amount: money(it.amount),
+      }));
+      const received = Number(data.amount || 0);
+      const totalSpent = input.items.reduce((s, it) => s + it.amount, 0);
+      const amountReturned = input.amountReturned ?? 0;
+      const overspend = Math.max(0, totalSpent - received);
+      const unaccounted = Math.max(0, received - totalSpent - amountReturned);
+      const now = new Date();
+      const liquidation: CashLiquidation = {
+        items,
+        totalSpent: money(totalSpent),
+        amountReturned: money(amountReturned),
+        overspend: money(overspend),
+        unaccounted: money(unaccounted),
+        notes: input.notes ?? null,
+        status: "submitted",
+        rejectionReason: null,
+        submittedBy: ctx.user.id, submittedByName: ctx.user.name || 'Unknown', submittedAt: now,
+        verifiedBy: null, verifiedByName: null, verifiedAt: null,
+      };
+      await ref.set({ liquidation, updatedAt: now }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "liquidate", "cash_request", input.id, `Submitted liquidation for ${input.id}: spent ${money(totalSpent)} of ${money(received)}, returned ${money(amountReturned)}${overspend > 0 ? `, overspend ${money(overspend)}` : ''}${unaccounted > 0 ? `, unaccounted ${money(unaccounted)}` : ''}`);
+      const admins = (await listUsersRaw()).filter(u => u.role === 'admin');
+      await Promise.all(admins.map(a => fsInsertOne("notifications", {
+        userId: a.id, type: "cash_liquidation_submitted",
+        message: `${ctx.user.name || 'A sub-admin'} submitted a liquidation for ${input.id} — spent ${money(totalSpent)} of ${money(received)}${unaccounted > 0 ? `, ${money(unaccounted)} unaccounted` : ''}.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      })));
+      return { success: true };
+    }),
+
+    // Admin signs off that the liquidation + accounting is correct — the control
+    // that confirms the money went where it was requested.
+    verifyLiquidation: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (!data.liquidation || data.liquidation.status !== 'submitted') throw new Error("No liquidation awaiting verification");
+      const now = new Date();
+      const liquidation: CashLiquidation = {
+        ...data.liquidation,
+        status: "verified", rejectionReason: null,
+        verifiedBy: ctx.user.id, verifiedByName: ctx.user.name || 'Admin', verifiedAt: now,
+      };
+      await ref.set({ liquidation, updatedAt: now }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "verify", "cash_request", input.id, `Verified liquidation for ${input.id}`);
+      if (data.liquidation.submittedBy) await fsInsertOne("notifications", {
+        userId: data.liquidation.submittedBy, type: "cash_liquidation_verified",
+        message: `Your liquidation for cash request ${input.id} was verified.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    // Admin sends a liquidation back for correction; the submitter can redo it.
+    rejectLiquidation: adminProcedure.input(z.object({ id: z.string(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (!data.liquidation || data.liquidation.status !== 'submitted') throw new Error("No liquidation awaiting verification");
+      const now = new Date();
+      const liquidation: CashLiquidation = {
+        ...data.liquidation,
+        status: "rejected", rejectionReason: input.reason ?? null,
+        verifiedBy: ctx.user.id, verifiedByName: ctx.user.name || 'Admin', verifiedAt: now,
+      };
+      await ref.set({ liquidation, updatedAt: now }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "cash_request", input.id, `Sent liquidation for ${input.id} back for correction`);
+      if (data.liquidation.submittedBy) await fsInsertOne("notifications", {
+        userId: data.liquidation.submittedBy, type: "cash_liquidation_rejected",
+        message: `Your liquidation for cash request ${input.id} was sent back for correction${input.reason ? `: ${input.reason}` : ''}.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
       return { success: true };
     }),
 

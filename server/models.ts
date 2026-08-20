@@ -742,6 +742,37 @@ export interface CashRequestItem {
   amount: string;
 }
 
+// One accounted expense within a liquidation — what the cash was actually spent
+// on after it was received (with an optional link back to a requested purpose).
+export interface CashLiquidationItem {
+  purposeOptionId: number | null; // optional tag back to a requested purpose
+  purposeLabel: string | null;
+  description: string;            // what was actually bought / paid for
+  payee: string | null;          // vendor / person paid
+  spentDate: Date | null;
+  amount: string;                // actual amount spent on this line
+}
+
+// The accounting of a received cash request: how it was spent, what was
+// returned, and the resulting variance. Submitted by a sub-admin, then verified
+// by an admin — this is what proves the money went where it was requested.
+export interface CashLiquidation {
+  items: CashLiquidationItem[];
+  totalSpent: string;
+  amountReturned: string; // leftover cash handed back to the cashbox
+  overspend: string;      // spent beyond the cash received (to reimburse), else "0"
+  unaccounted: string;    // received but neither spent nor returned (holder owes), else "0"
+  notes: string | null;
+  status: "submitted" | "verified" | "rejected";
+  rejectionReason: string | null; // admin's note when sent back for correction
+  submittedBy: number | null;
+  submittedByName: string | null;
+  submittedAt: Date | null;
+  verifiedBy: number | null;
+  verifiedByName: string | null;
+  verifiedAt: Date | null;
+}
+
 export interface CashRequest {
   id: string; // "cr-0701053" — the Firestore doc id itself, not a numeric surrogate
   month: number; // 1-12, month this request is attributed to
@@ -772,6 +803,8 @@ export interface CashRequest {
   // Admin's reason for rejecting, kept separate from the requester's own `notes`.
   // Absent (`undefined`) on requests rejected before this field existed.
   rejectionReason: string | null;
+  // Filled once the received cash is accounted for. Absent = not yet liquidated.
+  liquidation?: CashLiquidation | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -780,7 +813,7 @@ export interface CashRequest {
 export interface Notification {
   id: number;
   userId: number;
-  type: "cash_request_created" | "cash_request_approved" | "cash_request_rejected" | "cash_request_received";
+  type: "cash_request_created" | "cash_request_approved" | "cash_request_rejected" | "cash_request_received" | "cash_liquidation_submitted" | "cash_liquidation_verified" | "cash_liquidation_rejected";
   message: string;
   link: string | null;
   entityId: string | null;
