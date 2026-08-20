@@ -166,7 +166,7 @@ export default function ProjectPayments() {
                   <tr className="border-b border-border text-muted-foreground">
                     <th className="text-left py-3 px-3">Project Name</th>
                     <th className="text-left py-3 px-3">Customer</th>
-                    <th className="text-right py-3 px-3">Total Amount</th>
+                    <th className="text-right py-3 px-3">Total Project Price</th>
                     <th className="text-right py-3 px-3">Total Paid</th>
                     <th className="text-right py-3 px-3">Balance</th>
                     <th className="text-center py-3 px-3">Status</th>
@@ -221,7 +221,15 @@ export default function ProjectPayments() {
           {
             title: "Payment Summary",
             fields: [
-              { label: "Total Project Amount", value: viewingPayment ? formatPHP(viewingPayment.totalProjectAmount) : undefined },
+              ...(viewingPayment && viewingPayment.totalSource !== "contract"
+                ? [
+                    { label: "Base Contract", value: formatPHP(viewingPayment.baseContractAmount) },
+                    ...(viewingPayment.totalSource === "billing"
+                      ? [{ label: "Add-ons (from billing)", value: formatPHP(Number(viewingPayment.totalProjectAmount) - Number(viewingPayment.baseContractAmount)) }]
+                      : [{ label: "Linked Quotation", value: formatPHP(viewingPayment.linkedQuotationTotal) }]),
+                  ]
+                : []),
+              { label: "Total Project Price", value: viewingPayment ? formatPHP(viewingPayment.totalProjectAmount) : undefined },
               { label: "Total Paid", value: viewingPayment ? formatPHP(viewingPayment.totalPaid) : undefined },
               { label: "Balance", value: viewingPayment ? formatPHP(viewingPayment.balance) : undefined },
               {

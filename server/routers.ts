@@ -117,6 +117,34 @@ async function recalcQuotationTotals(quotationId: number): Promise<void> {
 }
 
 /**
+ * The all-inclusive price of a project ("Total Project Price"), computed without
+ * double-counting. A saved Project Billing already merges the contract amount +
+ * the linked quotation + any extras, so when one exists its total IS the project
+ * price (and it matches the Billing/SOA PDFs). Otherwise the price is the base
+ * contract amount plus the linked quotation total (quotation adds on top; if
+ * there's no contract, the quotation total stands alone). `billing`/`quotation`
+ * are the project's own records (or undefined).
+ *
+ * Returns the pieces too so the UI can show a breakdown of how the total is made.
+ */
+function projectEffectiveTotal(
+  project: Pick<Project, "totalProjectAmount" | "quotationId">,
+  billing: ProjectBilling | undefined,
+  quotation: Quotation | undefined,
+): { total: number; base: number; quotationTotal: number; billingTotal: number; source: "billing" | "contract_plus_quotation" | "contract" } {
+  const base = Number(project.totalProjectAmount || 0);
+  const quotationTotal = quotation ? Number(quotation.totalAmount || 0) : 0;
+  const billingTotal = billing ? Number(billing.total || 0) : 0;
+  if (billing && billingTotal > 0) {
+    return { total: billingTotal, base, quotationTotal, billingTotal, source: "billing" };
+  }
+  if (quotationTotal > 0) {
+    return { total: base + quotationTotal, base, quotationTotal, billingTotal, source: "contract_plus_quotation" };
+  }
+  return { total: base, base, quotationTotal, billingTotal, source: "contract" };
+}
+
+/**
  * Cash requests can hold several entries. Records created before multi-entry
  * support have no `items`, so read every request through this — it falls back
  * to the single legacy purpose/amount so old records still display and total up.
@@ -2914,10 +2942,15 @@ export const appRouter = router({
       createdDateFrom: z.string().optional(),
       createdDateTo: z.string().optional(),
     })).query(async ({ input }) => {
-      const [allProjects, allPayments] = await Promise.all([
+      const [allProjects, allPayments, allBillings, allQuotations] = await Promise.all([
         fsListAll<Project>("projects"),
         fsListAll<ProjectPayment>("project_payments"),
+        fsListAll<ProjectBilling>("project_billings"),
+        fsListAll<Quotation>("quotations"),
       ]);
+      const billingByProject = new Map<number, ProjectBilling>();
+      for (const b of allBillings) if (!billingByProject.has(b.projectId)) billingByProject.set(b.projectId, b);
+      const quotationById = new Map(allQuotations.map(q => [q.id, q]));
       let rows = allProjects;
       if (input.search) {
         const s = input.search.toLowerCase();
@@ -2951,12 +2984,14 @@ export const appRouter = router({
         paymentsMap.set(pmt.projectId, (paymentsMap.get(pmt.projectId) || 0) + Number(pmt.amount));
       }
       return rows.map(r => {
-        const totalAmount = parseFloat(r.totalProjectAmount || "0");
+        const eff = projectEffectiveTotal(r, billingByProject.get(r.id), r.quotationId ? quotationById.get(r.quotationId) : undefined);
+        const totalAmount = eff.total; // all-inclusive price (contract + quotation/billing add-ons)
         const totalPaid = paymentsMap.get(r.id) || 0;
         let paymentStatus = "unpaid";
         if (totalAmount > 0 && totalPaid >= totalAmount) paymentStatus = "fully_paid";
         else if (totalPaid > 0) paymentStatus = "partially_paid";
-        return { ...r, paymentStatus };
+        // totalProjectPrice = all-inclusive; totalProjectAmount stays the raw base contract.
+        return { ...r, paymentStatus, totalProjectPrice: money(totalAmount), totalProjectPriceSource: eff.source };
       });
     }),
     getById: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
@@ -3121,17 +3156,29 @@ export const appRouter = router({
       return { success: true };
     }),
     paymentSummary: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
-      const [project, payments] = await Promise.all([
+      const [project, payments, billings] = await Promise.all([
         fsGetById<Project>("projects", input.projectId),
         fsListAll<ProjectPayment>("project_payments", { where: [["projectId", "==", input.projectId]] }),
+        fsListAll<ProjectBilling>("project_billings", { where: [["projectId", "==", input.projectId]] }),
       ]);
-      const totalProjectAmount = Number(project?.totalProjectAmount || 0);
+      const quotation = project?.quotationId ? await fsGetById<Quotation>("quotations", project.quotationId) : undefined;
+      const eff = project
+        ? projectEffectiveTotal(project, billings[0], quotation || undefined)
+        : { total: 0, base: 0, quotationTotal: 0, billingTotal: 0, source: "contract" as const };
+      // baseContractAmount = raw price at creation; totalProjectAmount = all-inclusive price.
+      const baseContractAmount = eff.base;
+      const totalProjectAmount = eff.total;
       const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
       const balance = totalProjectAmount - totalPaid;
       let status: "unpaid" | "partially_paid" | "fully_paid" = "unpaid";
       if (totalPaid >= totalProjectAmount && totalProjectAmount > 0) status = "fully_paid";
       else if (totalPaid > 0) status = "partially_paid";
-      return { totalPaid, totalProjectAmount, balance, status };
+      return {
+        totalPaid, totalProjectAmount, balance, status,
+        // Breakdown so the UI can show how the total is built up.
+        baseContractAmount, linkedQuotationTotal: eff.quotationTotal, billingTotal: eff.billingTotal,
+        totalSource: eff.source,
+      };
     }),
     // Central payments list across all projects
     paymentsList: protectedProcedure.input(z.object({
@@ -3140,10 +3187,15 @@ export const appRouter = router({
       dateFrom: z.string().optional(),
       dateTo: z.string().optional(),
     })).query(async ({ input }) => {
-      const [allProjects, allPayments] = await Promise.all([
+      const [allProjects, allPayments, allBillings, allQuotations] = await Promise.all([
         fsListAll<Project>("projects"),
         fsListAll<ProjectPayment>("project_payments"),
+        fsListAll<ProjectBilling>("project_billings"),
+        fsListAll<Quotation>("quotations"),
       ]);
+      const billingByProject = new Map<number, ProjectBilling>();
+      for (const b of allBillings) if (!billingByProject.has(b.projectId)) billingByProject.set(b.projectId, b);
+      const quotationById = new Map(allQuotations.map(q => [q.id, q]));
       const paymentsByProject = new Map<number, ProjectPayment[]>();
       for (const pmt of allPayments) {
         const arr = paymentsByProject.get(pmt.projectId) ?? [];
@@ -3160,7 +3212,8 @@ export const appRouter = router({
         }
         const payments = paymentsByProject.get(project.id) ?? [];
         const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
-        const totalProjectAmount = Number(project.totalProjectAmount || 0);
+        const eff = projectEffectiveTotal(project, billingByProject.get(project.id), project.quotationId ? quotationById.get(project.quotationId) : undefined);
+        const totalProjectAmount = eff.total; // all-inclusive price
         const balance = totalProjectAmount - totalPaid;
         let status: "unpaid" | "partially_paid" | "fully_paid" = "unpaid";
         if (totalPaid >= totalProjectAmount && totalProjectAmount > 0) status = "fully_paid";
@@ -3176,7 +3229,11 @@ export const appRouter = router({
           projectId: project.id,
           projectName: project.name,
           customerName: project.customerName || "-",
-          totalProjectAmount,
+          totalProjectAmount, // all-inclusive price (base + quotation/billing add-ons)
+          baseContractAmount: eff.base,
+          linkedQuotationTotal: eff.quotationTotal,
+          billingTotal: eff.billingTotal,
+          totalSource: eff.source,
           totalPaid,
           balance,
           status,
@@ -3187,10 +3244,15 @@ export const appRouter = router({
       return results;
     }),
     paymentAnalytics: protectedProcedure.query(async () => {
-      const [allProjects, allPayments] = await Promise.all([
+      const [allProjects, allPayments, allBillings, allQuotations] = await Promise.all([
         fsListAll<Project>("projects"),
         fsListAll<ProjectPayment>("project_payments"),
+        fsListAll<ProjectBilling>("project_billings"),
+        fsListAll<Quotation>("quotations"),
       ]);
+      const billingByProject = new Map<number, ProjectBilling>();
+      for (const b of allBillings) if (!billingByProject.has(b.projectId)) billingByProject.set(b.projectId, b);
+      const quotationById = new Map(allQuotations.map(q => [q.id, q]));
       const paidByProject = new Map<number, number>();
       for (const pmt of allPayments) paidByProject.set(pmt.projectId, (paidByProject.get(pmt.projectId) || 0) + Number(pmt.amount || 0));
       let totalReceivables = 0;
@@ -3199,7 +3261,8 @@ export const appRouter = router({
       let fullyPaidCount = 0;
       for (const project of allProjects) {
         const totalPaid = paidByProject.get(project.id) || 0;
-        const totalProjectAmount = Number(project.totalProjectAmount || 0);
+        // Use the all-inclusive project price so receivables include add-ons.
+        const totalProjectAmount = projectEffectiveTotal(project, billingByProject.get(project.id), project.quotationId ? quotationById.get(project.quotationId) : undefined).total;
         const balance = totalProjectAmount - totalPaid;
         if (totalPaid >= totalProjectAmount && totalProjectAmount > 0) fullyPaidCount++;
         else if (totalPaid > 0) { partiallyPaidCount++; totalReceivables += balance; }

@@ -506,7 +506,9 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       // No saved billing yet: seed the contract amount (if any) plus every line
       // item from the linked quotation. If there's no contract amount, the
       // quotation lines become the whole billing ("quotation takes over").
-      const contract = Number(summary?.totalProjectAmount || 0);
+      // Use the RAW base contract here (not the all-inclusive total) so the
+      // seeded billing doesn't double-count the quotation added below.
+      const contract = Number(summary?.baseContractAmount || 0);
       const rows: BillRow[] = [];
       if (contract > 0) {
         rows.push({ description: "Project contract amount", inventoryItemId: null, sku: null, quantity: "1", unitPrice: String(contract) });
@@ -612,8 +614,13 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Project Amount</p>
+            <p className="text-xs text-muted-foreground">Total Project Price</p>
             <p className="text-xl font-bold text-foreground">{summary?.totalProjectAmount ? formatPHP(summary.totalProjectAmount) : "Not set"}</p>
+            {summary && summary.totalSource === "billing" ? (
+              <p className="mt-1 text-[11px] text-muted-foreground">From saved billing (contract + add-ons)</p>
+            ) : summary && Number(summary.linkedQuotationTotal) > 0 ? (
+              <p className="mt-1 text-[11px] text-muted-foreground">Contract {formatPHP(summary.baseContractAmount)} + quotation {formatPHP(summary.linkedQuotationTotal)}</p>
+            ) : null}
           </CardContent>
         </Card>
         <Card className="bg-card border-border">

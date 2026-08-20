@@ -13,6 +13,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
 import { confirm } from "@/lib/confirm";
+import { formatPHP } from "@/lib/utils";
 
 const STAGES = [
   { value: "procurement", label: "Procurement", color: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30" },
@@ -314,6 +315,7 @@ export default function Projects() {
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Type</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Size</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Stage</th>
+                    <th className="text-right p-4 text-sm font-medium text-muted-foreground">Total Project Price</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Payment</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Location</th>
                     <th className="text-left p-4 text-sm font-medium text-muted-foreground">Start Date</th>
@@ -330,6 +332,7 @@ export default function Projects() {
                       <td className="p-4 text-sm text-muted-foreground">{project.typeOfSetup || "-"}</td>
                       <td className="p-4 text-sm text-muted-foreground">{project.sizeOfSetup || "-"}</td>
                       <td className="p-4"><StageBadge stage={project.stage} /></td>
+                      <td className="p-4 text-right text-foreground">{Number(project.totalProjectPrice ?? project.totalProjectAmount) > 0 ? formatPHP(project.totalProjectPrice ?? project.totalProjectAmount) : "-"}</td>
                       <td className="p-4">
                         {project.paymentStatus === "fully_paid" ? (
                           <Badge className="bg-green-500/20 text-green-400 border-green-500/30 border text-xs">Paid</Badge>
