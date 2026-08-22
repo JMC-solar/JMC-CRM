@@ -96,8 +96,17 @@ export default function ProjectDetail() {
   const { data: opportunitiesList } = trpc.opportunities.list.useQuery({ search: undefined, status: undefined });
   const { data: quotationsList } = trpc.quotations.list.useQuery();
 
+  // Surface inventory changes from a materials reconcile: refresh stock views and
+  // warn (don't block) if any item was driven below zero.
+  const notifyMaterials = (m: any) => {
+    if (!m) return;
+    utils.inventory.invalidate();
+    if (m.shortfalls?.length) {
+      toast.message(`⚠️ Low stock: ${m.shortfalls.map((s: any) => `${s.name} (short ${s.short})`).join(", ")}`);
+    }
+  };
   const updateMutation = trpc.projects.update.useMutation({
-    onSuccess: () => { toast.success("Project updated"); setIsEditOpen(false); utils.projects.getById.invalidate({ id: projectId }); },
+    onSuccess: (data: any) => { toast.success("Project updated"); setIsEditOpen(false); utils.projects.getById.invalidate({ id: projectId }); notifyMaterials(data?.materials); },
     onError: (err: any) => toast.error(err.message),
   });
   const updateStageMutation = trpc.projects.updateStage.useMutation({
@@ -484,7 +493,18 @@ function PaymentsSection({ projectId }: { projectId: number }) {
     }));
 
   const saveBillingMutation = trpc.projectBillings.save.useMutation({
-    onSuccess: (data: any) => { toast.success(`Billing ${data.billingNumber} saved`); utils.projectBillings.get.invalidate({ projectId }); },
+    onSuccess: (data: any) => {
+      const issued = data?.materials?.issued?.length || 0;
+      const returned = data?.materials?.returned?.length || 0;
+      toast.success(`Billing ${data.billingNumber} saved${issued ? ` — ${issued} item(s) deducted from inventory` : returned ? ` — ${returned} item(s) returned to inventory` : ""}`);
+      utils.projectBillings.get.invalidate({ projectId });
+      utils.projects.getById.invalidate({ id: projectId });
+      utils.inventory.invalidate();
+      const shortfalls = data?.materials?.shortfalls;
+      if (shortfalls?.length) {
+        toast.message(`⚠️ Low stock: ${shortfalls.map((s: any) => `${s.name} (short ${s.short})`).join(", ")}`);
+      }
+    },
     onError: (err: any) => toast.error(err.message),
   });
 
@@ -659,6 +679,16 @@ function PaymentsSection({ projectId }: { projectId: number }) {
           </div>
         </CardHeader>
         <CardContent>
+          {(project as any)?.materialsIssued?.length ? (
+            <div className="mb-4 rounded-md border border-border bg-muted/20 p-3">
+              <p className="text-xs font-medium text-muted-foreground flex items-center gap-1"><Package className="h-3.5 w-3.5" /> Materials deducted from inventory</p>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-foreground">
+                {(project as any).materialsIssued.map((m: any) => (
+                  <span key={m.itemId}>{m.itemName || `#${m.itemId}`}{m.sku ? ` (${m.sku})` : ""} — <span className="font-medium">{m.quantity}</span></span>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {!payments?.length ? (
             <p className="text-muted-foreground text-sm py-4 text-center">No payments recorded yet.</p>
           ) : (

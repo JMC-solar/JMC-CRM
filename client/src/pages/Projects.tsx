@@ -59,11 +59,11 @@ export default function Projects() {
   const { data: quotationsList } = trpc.quotations.list.useQuery();
 
   const createMutation = trpc.projects.create.useMutation({
-    onSuccess: (data) => { toast.success("Project created"); setIsCreateOpen(false); resetCreateForm(); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); navigate(`/projects/${data.id}`); },
+    onSuccess: (data) => { toast.success("Project created"); setIsCreateOpen(false); resetCreateForm(); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); utils.inventory.invalidate(); navigate(`/projects/${data.id}`); },
     onError: (err: any) => toast.error(err.message),
   });
   const deleteMutation = trpc.projects.delete.useMutation({
-    onSuccess: () => { toast.success("Project deleted"); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); },
+    onSuccess: () => { toast.success("Project deleted — any issued materials returned to inventory"); utils.projects.list.invalidate(); utils.projects.stats.invalidate(); utils.inventory.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
 

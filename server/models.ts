@@ -399,6 +399,17 @@ export interface AuditLog {
 }
 
 // ============ PROJECT MONITORING ============
+// A snapshot of one inventory item currently deducted from stock for a project.
+// The full list (materialsIssued) is the ledger of what this project has taken
+// out of inventory — reconciliation compares it to the project's desired
+// materials and moves stock by the difference, so re-saves never double-deduct.
+export interface ProjectIssuedItem {
+  itemId: number;
+  itemName: string | null;
+  sku: string | null;
+  quantity: number;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -416,6 +427,8 @@ export interface Project {
   contactId: number | null;
   totalProjectAmount: string | null;
   notes: string | null;
+  // What this project has currently deducted from inventory. Absent = nothing yet.
+  materialsIssued?: ProjectIssuedItem[];
   createdBy: number | null;
   createdAt: Date;
   updatedAt: Date;
