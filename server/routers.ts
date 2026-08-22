@@ -49,6 +49,7 @@ import type {
   DeliveryReceipt,
   AcknowledgementReceipt,
   Project,
+  ProjectIssuedItem,
   ProjectStatusHistory,
   ProjectPayment,
   NetMetering,
@@ -144,6 +145,128 @@ function projectEffectiveTotal(
     return { total: base + quotationTotal, base, quotationTotal, billingTotal, source: "contract_plus_quotation" };
   }
   return { total: base, base, quotationTotal, billingTotal, source: "contract" };
+}
+
+// ---- Project materials ↔ inventory ---------------------------------------
+// A project consumes materials from inventory. The single source of truth for
+// WHICH materials (no double-counting) mirrors the price precedence above: a
+// saved Project Billing's inventory lines win (it already merges the linked
+// quotation), otherwise the linked quotation's inventory lines. Only real
+// inventory-type lines count; labor/custom/manual lines never move stock.
+async function computeProjectDesiredMaterials(project: Project): Promise<Map<number, number>> {
+  const desired = new Map<number, number>();
+  const billings = await fsListAll<ProjectBilling>("project_billings", { where: [["projectId", "==", project.id]] });
+  const billing = billings[0];
+  if (billing) {
+    for (const it of billing.items || []) {
+      const id = it.inventoryItemId ?? null;
+      const qty = Number(it.quantity ?? 0);
+      if (id && qty > 0) desired.set(id, (desired.get(id) ?? 0) + qty);
+    }
+    return desired; // billing exists → it is authoritative (may legitimately be empty)
+  }
+  if (project.quotationId) {
+    const qitems = await fsListAll<QuotationItem>("quotation_items", { where: [["quotationId", "==", project.quotationId]] });
+    for (const it of qitems) {
+      const qty = Number(it.quantity ?? 0);
+      if (it.itemType === "inventory" && it.itemId && qty > 0) desired.set(it.itemId, (desired.get(it.itemId) ?? 0) + qty);
+    }
+  }
+  return desired;
+}
+
+/**
+ * Reconcile a project's inventory deductions to its desired materials. Compares
+ * the desired list to what the project has already taken (project.materialsIssued)
+ * and moves stock by the DIFFERENCE only: a shortfall issues more (stock_out), a
+ * reduced/removed line returns stock (stock_in). Idempotent (re-saving with the
+ * same materials is a no-op) and edit-safe. Deductions are allowed to drive
+ * stock negative (warn-but-allow) — the returned `shortfalls` list says which.
+ * `releaseAll` returns everything (used when a project is deleted).
+ */
+async function reconcileProjectMaterials(
+  projectId: number, actorId: number, actorName: string, opts?: { releaseAll?: boolean }
+): Promise<{ issued: { name: string; qty: number }[]; returned: { name: string; qty: number }[]; shortfalls: { name: string; short: number }[] }> {
+  const result = { issued: [] as { name: string; qty: number }[], returned: [] as { name: string; qty: number }[], shortfalls: [] as { name: string; short: number }[] };
+  const project = await fsGetById<Project>("projects", projectId);
+  if (!project) return result;
+
+  const desired = opts?.releaseAll ? new Map<number, number>() : await computeProjectDesiredMaterials(project);
+  const issued = project.materialsIssued ?? [];
+  const issuedMap = new Map<number, number>();
+  for (const it of issued) issuedMap.set(it.itemId, (issuedMap.get(it.itemId) ?? 0) + Number(it.quantity || 0));
+
+  // Names/sku for the new snapshot (desired items). Reading a few docs is cheap.
+  const desiredIds = [...desired.keys()];
+  const desiredInfos = await Promise.all(desiredIds.map(id => fsGetById<InventoryItem>("inventory_items", id)));
+  const infoById = new Map<number, InventoryItem | null>(desiredIds.map((id, i) => [id, desiredInfos[i] ?? null]));
+
+  const now = new Date();
+  const allIds = new Set<number>([...desired.keys(), ...issuedMap.keys()]);
+  for (const itemId of allIds) {
+    const want = desired.get(itemId) ?? 0;
+    const have = issuedMap.get(itemId) ?? 0;
+    const delta = want - have; // >0 issue more (stock_out); <0 return (stock_in)
+    if (delta === 0) continue;
+    const txnId = await fsAllocateIds("stock_transactions");
+    const auditId = await fsAllocateIds("inventory_audit_log");
+    const type = delta > 0 ? "stock_out" : "stock_in";
+    const qtyAbs = Math.abs(delta);
+    const applied = await fdb().runTransaction(async (tx) => {
+      const ref = fdb().collection("inventory_items").doc(String(itemId));
+      const snap = await tx.get(ref);
+      if (!snap.exists) return null; // item deleted — skip its movement
+      const inv = snap.data() as InventoryItem;
+      const prev = inv.stockOnHand ?? 0;
+      const next = prev - delta; // delta>0 reduces; delta<0 increases; may go negative
+      const purpose = delta > 0 ? "Project Materials Issued" : "Project Materials Returned";
+      tx.set(fdb().collection("stock_transactions").doc(String(txnId)), {
+        id: txnId, itemId, type, quantity: qtyAbs,
+        reference: project.name, purpose, purposeOptionId: null,
+        purposeRefId: project.id, purposeRefName: project.name,
+        accountId: null, accountName: null, contactId: null, contactName: null,
+        notes: `Project ${project.name}: materials ${have} → ${want}`,
+        createdBy: actorId, createdByName: actorName || "Unknown", createdAt: now,
+      });
+      tx.set(ref, { stockOnHand: next, updatedAt: now }, { merge: true });
+      tx.set(fdb().collection("inventory_audit_log").doc(String(auditId)), {
+        id: auditId, itemId, itemName: inv.name || null, itemSku: inv.sku || null,
+        transactionType: type, quantity: qtyAbs, previousStock: prev, newStock: next,
+        sourceLocation: delta > 0 ? (inv.warehouseLocation || null) : null,
+        destinationLocation: delta < 0 ? (inv.warehouseLocation || null) : null,
+        reference: project.name, purpose: `${purpose} (${project.name})`, notes: null,
+        performedBy: actorId, performedByName: actorName || "Unknown", createdAt: now,
+      });
+      return { name: inv.name || `#${itemId}`, next };
+    });
+    if (!applied) continue;
+    if (delta > 0) {
+      result.issued.push({ name: applied.name, qty: qtyAbs });
+      if (applied.next < 0) result.shortfalls.push({ name: applied.name, short: -applied.next });
+    } else {
+      result.returned.push({ name: applied.name, qty: qtyAbs });
+    }
+  }
+
+  // The new ledger is exactly the desired materials.
+  const snapshot: ProjectIssuedItem[] = desiredIds.map(id => ({
+    itemId: id,
+    itemName: infoById.get(id)?.name ?? null,
+    sku: infoById.get(id)?.sku ?? null,
+    quantity: desired.get(id) ?? 0,
+  }));
+  await fsUpdateOne("projects", projectId, { materialsIssued: snapshot });
+  if (result.issued.length || result.returned.length) {
+    await fsAudit(actorId, actorName, "materials", "project", projectId, `Reconciled project materials: issued ${result.issued.length}, returned ${result.returned.length}${result.shortfalls.length ? `, ${result.shortfalls.length} short` : ''}`);
+  }
+  return result;
+}
+
+// Re-sync every project linked to a quotation (only those without a billing are
+// actually affected — a billing overrides the quotation as the materials source).
+async function reconcileProjectsForQuotation(quotationId: number, actorId: number, actorName: string): Promise<void> {
+  const projects = await fsListAll<Project>("projects", { where: [["quotationId", "==", quotationId]] });
+  for (const p of projects) await reconcileProjectMaterials(p.id, actorId, actorName);
 }
 
 /**
@@ -2403,7 +2526,7 @@ export const appRouter = router({
     addItem: protectedProcedure.input(z.object({
       quotationId: z.number(), itemId: z.number().optional(), itemType: z.enum(["inventory", "labor", "custom"]).default("inventory"),
       description: z.string().min(1), quantity: z.number().min(1), unitPrice: z.string(),
-    })).mutation(async ({ input }) => {
+    })).mutation(async ({ input, ctx }) => {
       const totalPrice = money(input.quantity * Number(input.unitPrice));
       await fsInsertOne("quotation_items", {
         quotationId: input.quotationId,
@@ -2415,11 +2538,14 @@ export const appRouter = router({
         totalPrice,
       });
       await recalcQuotationTotals(input.quotationId);
+      // If this quotation is linked to a project (customer agreed), keep its materials in sync.
+      await reconcileProjectsForQuotation(input.quotationId, ctx.user.id, ctx.user.name || "Unknown");
       return { success: true };
     }),
-    removeItem: protectedProcedure.input(z.object({ id: z.number(), quotationId: z.number() })).mutation(async ({ input }) => {
+    removeItem: protectedProcedure.input(z.object({ id: z.number(), quotationId: z.number() })).mutation(async ({ input, ctx }) => {
       await fsDeleteOne("quotation_items", input.id);
       await recalcQuotationTotals(input.quotationId);
+      await reconcileProjectsForQuotation(input.quotationId, ctx.user.id, ctx.user.name || "Unknown");
       return { success: true };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
@@ -2607,7 +2733,9 @@ export const appRouter = router({
           items, total, notes: input.notes ?? existing[0].notes ?? null,
         });
         await fsAudit(ctx.user.id, ctx.user.name, "update", "project_billing", existing[0].id, `Updated project billing ${existing[0].billingNumber}: ${items.length} entries, total ₱${total}`);
-        return { success: true, id: existing[0].id, billingNumber: existing[0].billingNumber };
+        // Deduct/return inventory to match the billing's materials.
+        const materials = await reconcileProjectMaterials(input.projectId, ctx.user.id, ctx.user.name || "Unknown");
+        return { success: true, id: existing[0].id, billingNumber: existing[0].billingNumber, materials };
       }
 
       const billingNumber = `PB-${Date.now().toString(36).toUpperCase()}`;
@@ -2618,7 +2746,8 @@ export const appRouter = router({
         createdBy: ctx.user.id, createdByName: ctx.user.name || "Unknown",
       });
       await fsAudit(ctx.user.id, ctx.user.name, "create", "project_billing", id, `Issued project billing ${billingNumber}: ${items.length} entries, total ₱${total}`);
-      return { success: true, id, billingNumber };
+      const materials = await reconcileProjectMaterials(input.projectId, ctx.user.id, ctx.user.name || "Unknown");
+      return { success: true, id, billingNumber, materials };
     }),
   }),
 
@@ -3044,6 +3173,8 @@ export const appRouter = router({
         changedByName: ctx.user.name || "Unknown",
       });
       await fsAudit(ctx.user.id, ctx.user.name, "create", "project", id, `Created project: ${input.name}`);
+      // A quotation linked at creation means the customer agreed — deduct its materials.
+      if (input.quotationId) await reconcileProjectMaterials(id, ctx.user.id, ctx.user.name || "Unknown");
       return { success: true, id };
     }),
     update: protectedProcedure.input(z.object({
@@ -3070,7 +3201,9 @@ export const appRouter = router({
       };
       await fsUpdateOne("projects", id, updateData);
       await fsAudit(ctx.user.id, ctx.user.name, "update", "project", id, `Updated project: ${input.name}`);
-      return { success: true };
+      // Linking / changing the quotation can change the project's materials.
+      const materials = await reconcileProjectMaterials(id, ctx.user.id, ctx.user.name || "Unknown");
+      return { success: true, materials };
     }),
     updateStage: protectedProcedure.input(z.object({
       id: z.number(),
@@ -3101,6 +3234,8 @@ export const appRouter = router({
       return rows.slice().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     }),
     delete: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      // Return any materials this project had taken from inventory before it's gone.
+      await reconcileProjectMaterials(input.id, ctx.user.id, ctx.user.name || "Unknown", { releaseAll: true });
       const history = await fsListAll<ProjectStatusHistory>("project_status_history", { where: [["projectId", "==", input.id]] });
       await Promise.all(history.map(h => fsDeleteOne("project_status_history", h.id)));
       await fsDeleteOne("projects", input.id);
