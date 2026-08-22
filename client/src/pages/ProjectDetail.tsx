@@ -499,7 +499,11 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       toast.success(`Billing ${data.billingNumber} saved${issued ? ` — ${issued} item(s) deducted from inventory` : returned ? ` — ${returned} item(s) returned to inventory` : ""}`);
       utils.projectBillings.get.invalidate({ projectId });
       utils.projects.getById.invalidate({ id: projectId });
-      notifyMaterials(data?.materials);
+      utils.inventory.invalidate();
+      const shortfalls = data?.materials?.shortfalls;
+      if (shortfalls?.length) {
+        toast.message(`⚠️ Low stock: ${shortfalls.map((s: any) => `${s.name} (short ${s.short})`).join(", ")}`);
+      }
     },
     onError: (err: any) => toast.error(err.message),
   });

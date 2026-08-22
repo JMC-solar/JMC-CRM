@@ -197,13 +197,13 @@ async function reconcileProjectMaterials(
   for (const it of issued) issuedMap.set(it.itemId, (issuedMap.get(it.itemId) ?? 0) + Number(it.quantity || 0));
 
   // Names/sku for the new snapshot (desired items). Reading a few docs is cheap.
-  const desiredIds = [...desired.keys()];
+  const desiredIds = Array.from(desired.keys());
   const desiredInfos = await Promise.all(desiredIds.map(id => fsGetById<InventoryItem>("inventory_items", id)));
   const infoById = new Map<number, InventoryItem | null>(desiredIds.map((id, i) => [id, desiredInfos[i] ?? null]));
 
   const now = new Date();
-  const allIds = new Set<number>([...desired.keys(), ...issuedMap.keys()]);
-  for (const itemId of allIds) {
+  const allIds = new Set<number>([...desiredIds, ...Array.from(issuedMap.keys())]);
+  for (const itemId of Array.from(allIds)) {
     const want = desired.get(itemId) ?? 0;
     const have = issuedMap.get(itemId) ?? 0;
     const delta = want - have; // >0 issue more (stock_out); <0 return (stock_in)
