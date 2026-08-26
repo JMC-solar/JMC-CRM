@@ -285,6 +285,37 @@ export interface PoDeliveryRequest {
   updatedAt: Date;
 }
 
+// A proposed replacement set of a PO's line items (e.g. a supplier price change),
+// submitted by a sub-admin when the PO is locked by a payment or delivery. Admins
+// edit line items directly; this is the approval gate for everyone else.
+export interface PoItemChangeRequestLine {
+  itemId: number;
+  itemName: string | null;
+  itemSku: string | null;
+  description: string | null;
+  unit: string | null;
+  quantity: number;
+  unitPrice: string;
+}
+export interface PoItemChangeRequest {
+  id: number;
+  purchaseOrderId: number;
+  poNumber: string | null;
+  proposedItems: PoItemChangeRequestLine[]; // the full new line-item set
+  proposedTotal: string;
+  savePrices: boolean; // also update this supplier's saved prices on approval
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  requestedBy: number | null;
+  requestedByName: string | null;
+  decidedBy: number | null;
+  decidedByName: string | null;
+  decidedAt: Date | null;
+  rejectionReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // ============ BOM: PACKAGES ============
 export interface BomPackage {
   id: number;

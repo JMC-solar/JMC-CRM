@@ -97,6 +97,11 @@ export default function PurchaseOrderDetail() {
   const [editReceivedOpen, setEditReceivedOpen] = useState(false);
   const [editReceivedQty, setEditReceivedQty] = useState<Record<number, string>>({});
   const [correctionReason, setCorrectionReason] = useState("");
+  // Editing PO line items (fix a changed supplier price / quantity).
+  const [editItemsOpen, setEditItemsOpen] = useState(false);
+  const [editItemRows, setEditItemRows] = useState<any[]>([]);
+  const [savePricesToSupplier, setSavePricesToSupplier] = useState(false);
+  const [itemChangeReason, setItemChangeReason] = useState("");
   // Editing / deleting a payment (admins act directly; others submit a request).
   const [editingPayment, setEditingPayment] = useState<any>(null);
   const [editMethod, setEditMethod] = useState("");
@@ -216,6 +221,24 @@ export default function PurchaseOrderDetail() {
     onError: (err: any) => toast.error(err.message),
   });
 
+  const afterItemChange = () => { utils.purchaseOrders.get.invalidate({ id: poId }); utils.purchaseOrders.list.invalidate(); setEditItemsOpen(false); };
+  const updateItemsMutation = trpc.purchaseOrders.updateItems.useMutation({
+    onSuccess: () => { toast.success("Line items updated"); afterItemChange(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const requestItemChangeMutation = trpc.purchaseOrders.requestItemChange.useMutation({
+    onSuccess: () => { toast.success("Change submitted for admin approval"); afterItemChange(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const approveItemChangeMutation = trpc.purchaseOrders.approveItemChange.useMutation({
+    onSuccess: () => { toast.success("Change approved — PO updated"); utils.purchaseOrders.get.invalidate({ id: poId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const rejectItemChangeMutation = trpc.purchaseOrders.rejectItemChange.useMutation({
+    onSuccess: () => { toast.success("Change rejected"); utils.purchaseOrders.get.invalidate({ id: poId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+
   const handleAddPayment = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
@@ -307,6 +330,50 @@ export default function PurchaseOrderDetail() {
   const poDiscountAmount = poDiscountType === "percentage" ? poSubtotal * (poDiscountValue / 100) : poDiscountType === "fixed" ? poDiscountValue : 0;
   const poAfterDiscount = poSubtotal - poDiscountAmount;
   const poVatAmount = poVatEnabled ? poAfterDiscount * (poVatRate / 100) : 0;
+
+  // Line items are freely editable until the PO has a payment or a delivery;
+  // after that a sub-admin must request the change (admins still edit directly).
+  const poLocked = Number(po.paidAmount || 0) > 0 || po.deliveryStatus !== "not_delivered" || (po.items?.some((it: any) => Number(it.receivedQuantity || 0) > 0) ?? false);
+  const pendingItemChange = (po.itemChangeRequests ?? [])[0] || null;
+  const needsApproval = poLocked && !isAdmin;
+  // Live totals for the edit dialog (uses the PO's own VAT/discount).
+  const editSubtotal = editItemRows.reduce((s: number, r: any) => s + (Number(r.quantity) || 0) * (parseFloat(r.unitPrice) || 0), 0);
+  const editDiscount = poDiscountType === "percentage" ? editSubtotal * (poDiscountValue / 100) : poDiscountType === "fixed" ? poDiscountValue : 0;
+  const editVat = poVatEnabled ? (editSubtotal - editDiscount) * (poVatRate / 100) : 0;
+  const editTotal = editSubtotal - editDiscount + editVat;
+
+  const openEditItems = () => {
+    setEditItemRows((po.items ?? []).map((it: any) => ({
+      itemId: it.itemId, itemName: it.itemName, itemSku: it.itemSku, description: it.description, unit: it.unit,
+      quantity: String(it.quantity ?? 1), unitPrice: String(it.unitPrice ?? "0"), receivedQuantity: Number(it.receivedQuantity || 0),
+    })));
+    setSavePricesToSupplier(false);
+    setItemChangeReason("");
+    setEditItemsOpen(true);
+  };
+  const handleSaveItems = () => {
+    const items = editItemRows
+      .map((r: any) => ({
+        itemId: r.itemId, itemName: r.itemName ?? undefined, itemSku: r.itemSku ?? undefined,
+        description: r.description ?? undefined, unit: r.unit ?? undefined,
+        quantity: Math.floor(Number(r.quantity) || 0), unitPrice: String(parseFloat(r.unitPrice) || 0),
+      }))
+      .filter((r: any) => r.quantity > 0);
+    if (items.length === 0) { toast.error("Keep at least one line item with a quantity."); return; }
+    // Guard: a line that already has received units can't drop below that (server enforces too).
+    for (const r of editItemRows) {
+      if (Number(r.receivedQuantity || 0) > 0 && Math.floor(Number(r.quantity) || 0) < Number(r.receivedQuantity)) {
+        toast.error(`"${r.itemName || r.itemId}" can't go below the ${r.receivedQuantity} already received.`);
+        return;
+      }
+    }
+    if (needsApproval) {
+      if (!itemChangeReason.trim()) { toast.error("Please give a reason for the admin."); return; }
+      requestItemChangeMutation.mutate({ purchaseOrderId: poId, items, savePrices: savePricesToSupplier, reason: itemChangeReason.trim() });
+    } else {
+      updateItemsMutation.mutate({ purchaseOrderId: poId, items, savePrices: savePricesToSupplier });
+    }
+  };
 
   // Delivery/receiving progress across all line items.
   const totalOrderedUnits = po.items?.reduce((s: number, it: any) => s + (Number(it.quantity) || 0), 0) || 0;
@@ -617,7 +684,19 @@ export default function PurchaseOrderDetail() {
       {/* Line Items */}
       <Card className="bg-card border-border">
         <CardHeader>
-          <CardTitle className="text-foreground flex items-center gap-2"><Package className="h-5 w-5" /> Line Items ({po.items?.length || 0})</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-foreground flex items-center gap-2"><Package className="h-5 w-5" /> Line Items ({po.items?.length || 0})</CardTitle>
+            {po.status !== "cancelled" && (
+              <Button
+                size="sm" variant="outline" className="border-border"
+                onClick={openEditItems}
+                disabled={!!pendingItemChange}
+                title={pendingItemChange ? "A change is awaiting admin approval" : undefined}
+              >
+                <Pencil className="h-4 w-4 mr-1" /> Edit Items
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
@@ -747,6 +826,125 @@ export default function PurchaseOrderDetail() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit line items — fix a changed supplier price / quantity without rebuilding the PO */}
+      <Dialog open={editItemsOpen} onOpenChange={setEditItemsOpen}>
+        <DialogContent className="bg-card border-border max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">{needsApproval ? "Request Line-Item Change" : "Edit Line Items"}</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <p className="text-xs text-muted-foreground">
+              Adjust unit prices or quantities, or remove a line — the PO total recalculates automatically. Amounts are in {cur}.
+              {needsApproval && " This PO has a payment or delivery, so your change is sent to an admin for approval."}
+            </p>
+            <div className="overflow-x-auto rounded-md border border-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left p-2 font-medium text-muted-foreground">Item</th>
+                    <th className="text-right p-2 font-medium text-muted-foreground">Qty</th>
+                    <th className="text-right p-2 font-medium text-muted-foreground">Unit Price ({sym})</th>
+                    <th className="text-right p-2 font-medium text-muted-foreground">Line Total</th>
+                    <th className="p-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {editItemRows.map((row: any, idx: number) => {
+                    const lineTotal = (Number(row.quantity) || 0) * (parseFloat(row.unitPrice) || 0);
+                    const received = Number(row.receivedQuantity || 0);
+                    return (
+                      <tr key={row.itemId} className="border-b border-border/50 last:border-0">
+                        <td className="p-2 text-foreground">
+                          {row.itemName}{row.itemSku ? <span className="ml-1 text-xs text-muted-foreground font-mono">{row.itemSku}</span> : null}
+                          {received > 0 && <span className="ml-1 text-[10px] text-green-400">({received} received)</span>}
+                        </td>
+                        <td className="p-2 text-right">
+                          <Input type="number" min={Math.max(received, 1)} step={1} value={row.quantity}
+                            onChange={(e) => setEditItemRows(editItemRows.map((r: any, i: number) => i === idx ? { ...r, quantity: e.target.value } : r))}
+                            className="bg-input border-border w-20 text-right ml-auto" />
+                        </td>
+                        <td className="p-2 text-right">
+                          <Input type="number" min="0" step="0.01" value={row.unitPrice}
+                            onChange={(e) => setEditItemRows(editItemRows.map((r: any, i: number) => i === idx ? { ...r, unitPrice: e.target.value } : r))}
+                            className="bg-input border-border w-28 text-right ml-auto" />
+                        </td>
+                        <td className="p-2 text-right tabular-nums text-foreground">{sym}{lineTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                        <td className="p-2 text-right">
+                          <Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-red-400"
+                            disabled={received > 0}
+                            title={received > 0 ? "Can't remove — already partly received" : "Remove line"}
+                            onClick={() => setEditItemRows(editItemRows.filter((_: any, i: number) => i !== idx))}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-col items-end gap-1 text-sm">
+              <div className="flex w-56 justify-between"><span className="text-muted-foreground">Subtotal</span><span className="tabular-nums">{sym}{editSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+              {editDiscount > 0 && <div className="flex w-56 justify-between"><span className="text-muted-foreground">Discount</span><span className="tabular-nums text-red-400">-{sym}{editDiscount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>}
+              {poVatEnabled && <div className="flex w-56 justify-between"><span className="text-muted-foreground">VAT ({poVatRate}%)</span><span className="tabular-nums">{sym}{editVat.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>}
+              <div className="flex w-56 justify-between border-t border-border pt-1 font-bold"><span>New Total</span><span className="tabular-nums">{sym}{editTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-foreground">
+              <input type="checkbox" checked={savePricesToSupplier} onChange={(e) => setSavePricesToSupplier(e.target.checked)} className="h-4 w-4" />
+              Also save the new price(s) for this supplier (used to auto-fill future POs)
+            </label>
+
+            {needsApproval && (
+              <div>
+                <Label>Reason for the admin *</Label>
+                <Textarea value={itemChangeReason} onChange={(e) => setItemChangeReason(e.target.value)} className="bg-input border-border" placeholder="e.g. Supplier raised the panel price without notice." />
+              </div>
+            )}
+
+            <Button className="w-full bg-primary text-primary-foreground" onClick={handleSaveItems} disabled={updateItemsMutation.isPending || requestItemChangeMutation.isPending}>
+              {needsApproval
+                ? (requestItemChangeMutation.isPending ? "Submitting..." : "Submit for Approval")
+                : (updateItemsMutation.isPending ? "Saving..." : "Save Changes")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pending line-item change requests awaiting admin action */}
+      {po.itemChangeRequests && po.itemChangeRequests.length > 0 && (
+        <Card className="bg-card border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-foreground flex items-center gap-2"><Clock className="h-5 w-5 text-yellow-400" /> Pending Line-Item Change Requests</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {po.itemChangeRequests.map((req: any) => (
+              <div key={req.id} className="rounded-md border border-border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="text-sm">
+                    <div className="font-medium text-foreground">Change line items — new total {sym}{Number(req.proposedTotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">Requested by {req.requestedByName || "Unknown"}{req.savePrices ? " · will update saved supplier prices" : ""}</div>
+                    <ul className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                      {(req.proposedItems ?? []).map((l: any, i: number) => (
+                        <li key={i}>{l.itemName || `Item #${l.itemId}`}: <span className="text-foreground">{l.quantity} × {sym}{Number(l.unitPrice || 0).toLocaleString()}</span></li>
+                      ))}
+                    </ul>
+                    {req.reason && <div className="text-xs text-muted-foreground mt-1">Reason: {req.reason}</div>}
+                  </div>
+                  {isAdmin ? (
+                    <div className="flex gap-2 shrink-0">
+                      <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => approveItemChangeMutation.mutate({ id: req.id })} disabled={approveItemChangeMutation.isPending}><Check className="h-4 w-4 mr-1" /> Approve</Button>
+                      <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => { const r = window.prompt("Reason for rejecting (optional):"); if (r === null) return; rejectItemChangeMutation.mutate({ id: req.id, reason: r || undefined }); }} disabled={rejectItemChangeMutation.isPending}><X className="h-4 w-4 mr-1" /> Reject</Button>
+                    </div>
+                  ) : (
+                    <Badge variant="outline" className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30 shrink-0">Awaiting admin</Badge>
+                  )}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Pending change requests (edit/delete) awaiting admin action */}
       {po.deliveryRequests && po.deliveryRequests.length > 0 && (
