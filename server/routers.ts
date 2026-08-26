@@ -44,6 +44,7 @@ import type {
   PoPayment,
   PoPaymentRequest,
   PoDeliveryRequest,
+  PoItemChangeRequest,
   Quotation,
   QuotationItem,
   DeliveryReceipt,
@@ -291,6 +292,93 @@ async function recomputePoTotals(purchaseOrderId: number): Promise<void> {
   if (paidAmount >= totalAmount && totalAmount > 0) paymentStatus = "paid";
   else if (paidAmount > 0) paymentStatus = "partially_paid";
   await fsUpdateOne("purchase_orders", purchaseOrderId, { paidAmount: money(paidAmount), paymentStatus });
+}
+
+// Upsert the remembered "last price" for a supplier+item (used to auto-fill
+// future POs). Same logic as the updateSupplierItemPrice procedure, callable
+// in-process when a PO edit opts in to saving its new prices.
+async function upsertSupplierItemPrice(supplierId: number, inventoryItemId: number, unitPrice: string, purchaseOrderId: number | null, updatedBy: number): Promise<void> {
+  const rows = await fsListAll<SupplierItemPrice>("supplier_item_prices", {
+    where: [["supplierId", "==", supplierId], ["inventoryItemId", "==", inventoryItemId]],
+  });
+  if (rows[0]) {
+    await fsUpdateOne("supplier_item_prices", rows[0].id, { unitPrice, lastPurchaseOrderId: purchaseOrderId ?? null, updatedBy });
+  } else {
+    await fsInsertOne("supplier_item_prices", { supplierId, inventoryItemId, unitPrice, lastPurchaseOrderId: purchaseOrderId ?? null, updatedBy });
+  }
+}
+
+// The PO grand total from a set of lines, applying the PO's own discount + VAT.
+function poTotalFromLines(lines: { quantity: number; unitPrice: string }[], po: PurchaseOrder): number {
+  const subtotal = lines.reduce((s, l) => s + l.quantity * parseFloat(l.unitPrice || "0"), 0);
+  const discountType = po.discountType || "none";
+  const discountValue = parseFloat(po.discountValue || "0");
+  const discountAmount = discountType === "percentage" ? subtotal * (discountValue / 100) : discountType === "fixed" ? discountValue : 0;
+  const afterDiscount = subtotal - discountAmount;
+  const vatEnabled = po.vatEnabled === 1 || (po.vatEnabled as unknown) === true;
+  const vatRate = parseFloat(po.vatRate || "12");
+  const vatAmount = vatEnabled ? afterDiscount * (vatRate / 100) : 0;
+  return afterDiscount + vatAmount;
+}
+
+type PoLineInput = { itemId: number; itemName?: string | null; itemSku?: string | null; description?: string | null; unit?: string | null; quantity: number; unitPrice: string };
+
+/**
+ * Replace a PO's line items with `newItems`, preserving each existing line's
+ * already-received quantity (matched by itemId). Recomputes the PO total (and
+ * re-checks payment status against it). A line that still has received units
+ * cannot be removed, nor dropped below what was received. When `savePrices`,
+ * changed/added line prices are written to the supplier's saved price list.
+ */
+async function applyPoItems(poId: number, newItems: PoLineInput[], savePrices: boolean, actorId: number, actorName: string): Promise<{ total: string }> {
+  const po = await fsGetById<PurchaseOrder>("purchase_orders", poId);
+  if (!po) throw new Error("Purchase order not found");
+  const existing = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", poId]] });
+  const existingByItem = new Map(existing.map(e => [e.itemId, e]));
+  const newByItem = new Map(newItems.map(n => [n.itemId, n]));
+
+  // Guard against breaking the delivery/stock record.
+  for (const ex of existing) {
+    const recv = Number(ex.receivedQuantity || 0);
+    if (recv <= 0) continue;
+    const nl = newByItem.get(ex.itemId);
+    if (!nl) throw new Error(`Cannot remove "${ex.itemName || ex.itemId}" — ${recv} already received`);
+    if (nl.quantity < recv) throw new Error(`"${ex.itemName || ex.itemId}" quantity can't be below the ${recv} already received`);
+  }
+
+  const priceChanged: { itemId: number; unitPrice: string }[] = [];
+  for (const nl of newItems) {
+    const price = nl.unitPrice || "0";
+    const lineTotal = money(nl.quantity * parseFloat(price));
+    const ex = existingByItem.get(nl.itemId);
+    if (ex) {
+      if ((ex.unitPrice || "0") !== price) priceChanged.push({ itemId: nl.itemId, unitPrice: price });
+      await fsUpdateOne("purchase_order_items", ex.id, {
+        quantity: nl.quantity, unitPrice: price, lineTotal,
+        itemName: nl.itemName ?? ex.itemName ?? null, itemSku: nl.itemSku ?? ex.itemSku ?? null,
+        description: nl.description ?? ex.description ?? null, unit: nl.unit ?? ex.unit ?? null,
+      });
+    } else {
+      priceChanged.push({ itemId: nl.itemId, unitPrice: price });
+      await fsInsertOne("purchase_order_items", {
+        purchaseOrderId: poId, itemId: nl.itemId,
+        itemName: nl.itemName ?? null, itemSku: nl.itemSku ?? null,
+        description: nl.description ?? null, unit: nl.unit ?? null,
+        quantity: nl.quantity, unitPrice: price, lineTotal, receivedQuantity: 0,
+      });
+    }
+  }
+  for (const ex of existing) if (!newByItem.has(ex.itemId)) await fsDeleteOne("purchase_order_items", ex.id);
+
+  const total = poTotalFromLines(newItems, po);
+  await fsUpdateOne("purchase_orders", poId, { totalAmount: money(total) });
+  await recomputePoTotals(poId); // refresh paymentStatus against the new total
+
+  if (savePrices && po.supplierId) {
+    for (const pc of priceChanged) await upsertSupplierItemPrice(po.supplierId, pc.itemId, pc.unitPrice, poId, actorId);
+  }
+  await fsAudit(actorId, actorName, "update", "purchase_order", poId, `Edited PO ${po.poNumber} line items: ${newItems.length} line(s), new total ${po.currency || "PHP"} ${money(total)}${savePrices ? ", saved supplier price(s)" : ""}`);
+  return { total: money(total) };
 }
 
 /**
@@ -1690,19 +1778,21 @@ export const appRouter = router({
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
       const po = await fsGetById<PurchaseOrder>("purchase_orders", input.id);
       if (!po) throw new Error("Purchase order not found");
-      const [items, payments, statusHistory, allPaymentRequests, allDeliveryRequests] = await Promise.all([
+      const [items, payments, statusHistory, allPaymentRequests, allDeliveryRequests, allItemChangeRequests] = await Promise.all([
         fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPayment>("po_payments", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<{ id: number; purchaseOrderId: number; type: string; status: string; eventDate: Date; changedBy: number; changedByName: string; createdAt: Date }>("po_status_history", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoPaymentRequest>("po_payment_requests", { where: [["purchaseOrderId", "==", input.id]] }),
         fsListAll<PoDeliveryRequest>("po_delivery_requests", { where: [["purchaseOrderId", "==", input.id]] }),
+        fsListAll<PoItemChangeRequest>("po_item_change_requests", { where: [["purchaseOrderId", "==", input.id]] }),
       ]);
       payments.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       statusHistory.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
       // Only pending requests matter for the panels (badges + approvals).
       const paymentRequests = allPaymentRequests.filter(r => r.status === "pending");
       const deliveryRequests = allDeliveryRequests.filter(r => r.status === "pending");
-      return { ...po, items, payments, statusHistory, paymentRequests, deliveryRequests };
+      const itemChangeRequests = allItemChangeRequests.filter(r => r.status === "pending");
+      return { ...po, items, payments, statusHistory, paymentRequests, deliveryRequests, itemChangeRequests };
     }),
 
     create: protectedProcedure.input(z.object({
@@ -2011,6 +2101,95 @@ export const appRouter = router({
       await fsUpdateOne("po_delivery_requests", input.id, { status: "rejected", rejectionReason: input.reason ?? null, decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
       if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_delivery_correction_rejected", message: `Your delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} was rejected.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
       await fsAudit(ctx.user.id, ctx.user.name, "reject", "po_delivery", req.purchaseOrderId, `Rejected delivery correction on PO ${req.poNumber ?? `#${req.purchaseOrderId}`}`);
+      return { success: true };
+    }),
+
+    // ----- Line-item edits: fix a changed supplier price / quantity without
+    // deleting & rebuilding the PO. Free while the PO has no payment and no
+    // delivery; once locked, admins edit directly and sub-admins must request. -----
+    updateItems: protectedProcedure.input(z.object({
+      purchaseOrderId: z.number(),
+      items: z.array(z.object({
+        itemId: z.number(),
+        itemName: z.string().optional(),
+        itemSku: z.string().optional(),
+        description: z.string().optional(),
+        unit: z.string().optional(),
+        quantity: z.number().min(1),
+        unitPrice: z.string(),
+      })).min(1),
+      savePrices: z.boolean().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const po = await fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId);
+      if (!po) throw new Error("Purchase order not found");
+      const items = await fsListAll<PurchaseOrderItem>("purchase_order_items", { where: [["purchaseOrderId", "==", input.purchaseOrderId]] });
+      const locked = Number(po.paidAmount || 0) > 0 || po.deliveryStatus !== "not_delivered" || items.some(i => Number(i.receivedQuantity || 0) > 0);
+      if (locked && ctx.user.role !== "admin") {
+        throw new Error("This PO already has a payment or delivery — submit a change request for an admin to approve.");
+      }
+      const pending = await fsListAll<PoItemChangeRequest>("po_item_change_requests", { where: [["purchaseOrderId", "==", input.purchaseOrderId], ["status", "==", "pending"]] });
+      if (pending.length) throw new Error("There is a pending item change awaiting approval on this PO.");
+      const res = await applyPoItems(input.purchaseOrderId, input.items, !!input.savePrices, ctx.user.id, ctx.user.name || "Unknown");
+      return { success: true, ...res };
+    }),
+
+    // Sub-admin: propose line-item changes on a locked PO; an admin approves.
+    requestItemChange: protectedProcedure.input(z.object({
+      purchaseOrderId: z.number(),
+      items: z.array(z.object({
+        itemId: z.number(),
+        itemName: z.string().optional(),
+        itemSku: z.string().optional(),
+        description: z.string().optional(),
+        unit: z.string().optional(),
+        quantity: z.number().min(1),
+        unitPrice: z.string(),
+      })).min(1),
+      savePrices: z.boolean().optional(),
+      reason: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const po = await fsGetById<PurchaseOrder>("purchase_orders", input.purchaseOrderId);
+      if (!po) throw new Error("Purchase order not found");
+      const existing = await fsListAll<PoItemChangeRequest>("po_item_change_requests", { where: [["purchaseOrderId", "==", input.purchaseOrderId], ["status", "==", "pending"]] });
+      if (existing.length) throw new Error("There is already a pending item change on this PO");
+      const proposedItems = input.items.map(it => ({
+        itemId: it.itemId, itemName: it.itemName ?? null, itemSku: it.itemSku ?? null,
+        description: it.description ?? null, unit: it.unit ?? null, quantity: it.quantity, unitPrice: it.unitPrice || "0",
+      }));
+      const proposedTotal = money(poTotalFromLines(proposedItems, po));
+      const id = await fsInsertOne("po_item_change_requests", {
+        purchaseOrderId: input.purchaseOrderId, poNumber: po.poNumber ?? null,
+        proposedItems, proposedTotal, savePrices: !!input.savePrices,
+        reason: input.reason ?? null, status: "pending",
+        requestedBy: ctx.user.id, requestedByName: ctx.user.name || "Unknown",
+        decidedBy: null, decidedByName: null, decidedAt: null, rejectionReason: null,
+      });
+      const admins = (await listUsersRaw()).filter(u => u.role === "admin");
+      await Promise.all(admins.map(a => fsInsertOne("notifications", {
+        userId: a.id, type: "po_item_change_request",
+        message: `${ctx.user.name || "A sub-admin"} requested a line-item change on PO ${po.poNumber} (new total ${po.currency || "PHP"} ${proposedTotal})`,
+        link: `/purchase-orders/${input.purchaseOrderId}`, entityId: input.purchaseOrderId, read: false,
+      })));
+      await fsAudit(ctx.user.id, ctx.user.name, "request", "po_items", input.purchaseOrderId, `Requested line-item change on PO ${po.poNumber}`);
+      return { success: true, id };
+    }),
+
+    approveItemChange: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoItemChangeRequest>("po_item_change_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      const res = await applyPoItems(req.purchaseOrderId, (req.proposedItems ?? []).map(l => ({ itemId: l.itemId, itemName: l.itemName, itemSku: l.itemSku, description: l.description, unit: l.unit, quantity: l.quantity, unitPrice: l.unitPrice })), !!req.savePrices, ctx.user.id, ctx.user.name || "Admin");
+      await fsUpdateOne("po_item_change_requests", input.id, { status: "approved", decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_item_change_approved", message: `Your line-item change on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} was approved.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "po_items", req.purchaseOrderId, `Approved line-item change on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} (new total ${res.total})`);
+      return { success: true };
+    }),
+
+    rejectItemChange: adminProcedure.input(z.object({ id: z.number(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const req = await fsGetById<PoItemChangeRequest>("po_item_change_requests", input.id);
+      if (!req || req.status !== "pending") throw new Error("Request not found or already decided");
+      await fsUpdateOne("po_item_change_requests", input.id, { status: "rejected", rejectionReason: input.reason ?? null, decidedBy: ctx.user.id, decidedByName: ctx.user.name || "Admin", decidedAt: new Date() });
+      if (req.requestedBy) await fsInsertOne("notifications", { userId: req.requestedBy, type: "po_item_change_rejected", message: `Your line-item change on PO ${req.poNumber ?? `#${req.purchaseOrderId}`} was rejected.`, link: `/purchase-orders/${req.purchaseOrderId}`, entityId: req.purchaseOrderId, read: false });
+      await fsAudit(ctx.user.id, ctx.user.name, "reject", "po_items", req.purchaseOrderId, `Rejected line-item change on PO ${req.poNumber ?? `#${req.purchaseOrderId}`}`);
       return { success: true };
     }),
 
