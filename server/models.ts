@@ -27,7 +27,7 @@ export interface User {
   email: string | null;
   mobile: string | null;
   loginMethod: string | null;
-  role: "admin" | "subadmin" | "purchaser" | "staff" | "sales_rep";
+  role: "admin" | "subadmin" | "purchaser" | "staff" | "sales_rep" | "auditor";
   status: "active" | "inactive";
   createdBy: number | null;
   createdAt: Date;

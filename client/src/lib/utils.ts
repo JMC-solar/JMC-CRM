@@ -42,6 +42,7 @@ export function formatMoney(value: string | number | null | undefined, currency?
  */
 export function homePathForRole(role?: string | null): string {
   if (role === "admin") return "/dashboard";
+  if (role === "auditor") return "/cash-requests"; // cash-only backup role
   if (["purchaser", "staff", "sales_rep"].includes(role || "")) return "/inventory";
   return "/projects"; // subadmin (and any other non-admin) \u2014 Project Monitoring
 }

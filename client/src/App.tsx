@@ -79,6 +79,15 @@ function AdminOnly({ children }: { children: ReactNode }) {
 // sidebar is never remounted on navigation (preserves its scroll position) and
 // no page can forget to render the shell.
 function AppRouter() {
+  // The Auditor role is scoped to Cash Requests only — bounce it back there from
+  // any other route (its own profile page for password changes is allowed).
+  const { user, loading } = useAuth();
+  const [location, setLocation] = useLocation();
+  useEffect(() => {
+    if (!loading && user?.role === "auditor" && location !== "/cash-requests" && location !== "/profile") {
+      setLocation("/cash-requests");
+    }
+  }, [loading, user, location, setLocation]);
   return (
     <DashboardLayout>
       <Switch>
