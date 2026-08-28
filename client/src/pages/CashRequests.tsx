@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { trpc } from "@/lib/trpc";
 import { formatPHP } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Plus, Check, X, Clock, CheckCircle, XCircle, Pencil, Trash2 } from "lucide-react";
+import { Plus, Check, X, Clock, CheckCircle, XCircle, Pencil, Trash2, Search } from "lucide-react";
 import DetailDialog from "@/components/DetailDialog";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -205,6 +205,15 @@ export default function CashRequests() {
   const [liqRows, setLiqRows] = useState<LiqRow[]>([emptyLiqRow()]);
   const [liqReturned, setLiqReturned] = useState("");
   const [liqNotes, setLiqNotes] = useState("");
+  // Approving with an editable "amount to release" (may exceed requested).
+  const [approving, setApproving] = useState<any>(null);
+  const [releaseAmount, setReleaseAmount] = useState("");
+  // Per-line liquidation review (admin) — track by id so it stays fresh on refetch.
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  // Search + filters on the main list.
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [liqFilter, setLiqFilter] = useState<string>("all");
 
   const { data: requests, isLoading } = trpc.cashRequests.list.useQuery();
   const sortedRequests = useMemo(() => (requests ? sortRequests(requests, sortMode) : requests), [requests, sortMode]);
@@ -227,6 +236,40 @@ export default function CashRequests() {
   const awaitingCount = awaitingLiquidation.length;
   const awaitingTotal = awaitingLiquidation.reduce((sum: number, r: any) => sum + Number(r.amount), 0);
 
+  // Flag likely double entries: same requester + same total + same first purpose within 3 days.
+  const duplicateIds = useMemo(() => {
+    const dup = new Set<string>();
+    const list = requests ?? [];
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a: any = list[i], b: any = list[j];
+        if (a.requestedBy === b.requestedBy && Number(a.amount) === Number(b.amount)) {
+          const ap = itemsOf(a)[0]?.purposeLabel, bp = itemsOf(b)[0]?.purposeLabel;
+          const days = Math.abs(new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()) / 86400000;
+          if (ap === bp && days <= 3) { dup.add(a.id); dup.add(b.id); }
+        }
+      }
+    }
+    return dup;
+  }, [requests]);
+
+  // Apply the search box + status/liquidation filters on top of the sort.
+  const displayedRequests = useMemo(() => {
+    let list = sortedRequests ?? [];
+    const q = search.trim().toLowerCase();
+    if (q) list = list.filter((r: any) => {
+      const hay = [r.id, r.requestedByName, r.receivedByName, r.decidedByName, r.amount, r.releasedAmount,
+        MONTH_NAMES[r.month - 1], String(r.year),
+        ...itemsOf(r).map((i: any) => i.purposeLabel),
+        ...((r.liquidation?.items ?? []).flatMap((it: any) => [it.description, it.payee, it.amount])),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+    if (statusFilter !== "all") list = list.filter((r: any) => r.status === statusFilter);
+    if (liqFilter !== "all") list = list.filter((r: any) => liqStateOf(r) === liqFilter);
+    return list;
+  }, [sortedRequests, search, statusFilter, liqFilter]);
+
   // The id is reserved and the request written atomically server-side, only at
   // actual submit — never while just browsing a month — so no number is ever
   // burned without a real request behind it. See handleCreate for the payload.
@@ -239,7 +282,7 @@ export default function CashRequests() {
     onError: (err: any) => toast.error(err.message),
   });
   const approveMutation = trpc.cashRequests.approve.useMutation({
-    onSuccess: () => { toast.success("Cash request approved"); setViewingRequest(null); utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); },
+    onSuccess: () => { toast.success("Cash request approved"); setViewingRequest(null); setApproving(null); utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
   const rejectMutation = trpc.cashRequests.reject.useMutation({
@@ -260,17 +303,36 @@ export default function CashRequests() {
     onError: (err: any) => toast.error(err.message),
   });
   const verifyLiqMutation = trpc.cashRequests.verifyLiquidation.useMutation({
-    onSuccess: () => { toast.success("Liquidation verified"); setViewingRequest(null); invalidateAll(); },
+    onSuccess: () => { toast.success("All lines accepted — liquidation reviewed"); setViewingRequest(null); setReviewingId(null); invalidateAll(); },
     onError: (err: any) => toast.error(err.message),
   });
   const rejectLiqMutation = trpc.cashRequests.rejectLiquidation.useMutation({
-    onSuccess: () => { toast.success("Sent back for correction"); setViewingRequest(null); invalidateAll(); },
+    onSuccess: () => { toast.success("Sent back for correction"); setViewingRequest(null); setReviewingId(null); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const reviewLineMutation = trpc.cashRequests.reviewLiquidationLine.useMutation({
+    onSuccess: () => { utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
 
+  // Keep the review dialog pointed at the latest data as lines are decided.
+  const reviewing = reviewingId ? (requests ?? []).find((r: any) => r.id === reviewingId) : null;
+  const openApprove = (req: any) => { setApproving(req); setReleaseAmount(String(req.amount ?? "")); };
+  const handleApprove = () => {
+    const amt = parseFloat(releaseAmount);
+    if (!(amt >= 0)) { toast.error("Enter the amount to release."); return; }
+    approveMutation.mutate({ id: approving.id, releasedAmount: amt });
+  };
+  const rejectLine = (id: string, index: number) => {
+    const reason = window.prompt("Why is this expense rejected? (charged to the receiver)") ?? undefined;
+    if (reason === undefined) return; // cancelled
+    reviewLineMutation.mutate({ id, index, decision: "rejected", reason: reason || undefined });
+  };
+
   // Received cash amount, spent, returned, and the resulting variance — recomputed
   // live in the dialog so the person accounting always sees whether it balances.
-  const liqReceived = liquidating ? Number(liquidating.amount || 0) : 0;
+  // Accounts against the amount actually RELEASED (the extra the admin decided).
+  const liqReceived = liquidating ? Number(liquidating.releasedAmount ?? liquidating.amount ?? 0) : 0;
   const liqSpent = liqRowsTotal(liqRows);
   const liqReturnedNum = parseFloat(liqReturned) || 0;
   const liqOverspend = Math.max(0, liqSpent - liqReceived);
@@ -448,7 +510,29 @@ export default function CashRequests() {
         </Card>
       </div>
 
-      <div className="flex gap-4">
+      <div className="flex flex-wrap gap-3">
+        <div className="relative min-w-[240px] flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="Search ID, requester, purpose, payee, amount, month…" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 bg-input border-border" />
+        </div>
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-44 bg-input border-border"><SelectValue placeholder="Status" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="pending">Pending</SelectItem>
+            <SelectItem value="approved">Approved</SelectItem>
+            <SelectItem value="rejected">Rejected</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={liqFilter} onValueChange={setLiqFilter}>
+          <SelectTrigger className="w-52 bg-input border-border"><SelectValue placeholder="Liquidation" /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All liquidation</SelectItem>
+            <SelectItem value="awaiting">Awaiting liquidation</SelectItem>
+            <SelectItem value="submitted">Submitted (to review)</SelectItem>
+            <SelectItem value="verified">Reviewed</SelectItem>
+          </SelectContent>
+        </Select>
         <Select value={sortMode} onValueChange={(v) => setSortMode(v as SortMode)}>
           <SelectTrigger className="w-56 bg-input border-border"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -480,18 +564,19 @@ export default function CashRequests() {
               <tbody>
                 {isLoading ? (
                   <tr><td colSpan={9} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
-                ) : sortedRequests?.length === 0 ? (
+                ) : displayedRequests?.length === 0 ? (
                   <tr><td colSpan={9} className="p-8 text-center text-muted-foreground">No cash requests found.</td></tr>
                 ) : (
-                  sortedRequests?.map((req: any) => {
+                  displayedRequests?.map((req: any) => {
                     // Any sub-admin (or admin) can confirm receipt — not just the requester.
                     const canMarkReceived = req.status === "approved" && !req.received && (isSubAdmin || isAdmin);
                     const editable = canEdit(req);
                     const deletable = canDelete(req);
                     const liqState = liqStateOf(req);
                     const canLiquidate = liqState === "awaiting" && (isSubAdmin || isAdmin);
-                    const canVerifyLiq = liqState === "submitted" && isAdmin;
-                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable || canLiquidate || canVerifyLiq;
+                    const canReviewLiq = liqState === "submitted" && isAdmin;
+                    const isDup = duplicateIds.has(req.id);
+                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable || canLiquidate || canReviewLiq;
                     const entries = itemsOf(req);
                     return (
                       <tr
@@ -507,7 +592,18 @@ export default function CashRequests() {
                             <span className="text-xs text-muted-foreground">{entries.length} entries</span>
                           )}
                         </td>
-                        <td className="p-4 text-sm font-medium tabular-nums text-foreground">{formatPHP(req.amount)}</td>
+                        <td className="p-4 text-sm font-medium tabular-nums text-foreground">
+                          {formatPHP(req.amount)}
+                          {req.accounting && Number(req.accounting.released) !== Number(req.amount) && (
+                            <div className="text-[11px] text-blue-400">released {formatPHP(req.accounting.released)}</div>
+                          )}
+                          {req.accounting && (Number(req.accounting.toReturn) > 0 || Number(req.accounting.toCharge) > 0) && (
+                            <div className="text-[11px] text-muted-foreground">
+                              {Number(req.accounting.toReturn) > 0 && <span className="text-amber-400">return {formatPHP(req.accounting.toReturn)} </span>}
+                              {Number(req.accounting.toCharge) > 0 && <span className="text-red-400">charge {formatPHP(req.accounting.toCharge)}</span>}
+                            </div>
+                          )}
+                        </td>
                         <td className="p-4 text-sm text-muted-foreground">{req.isOldRecord ? "Old" : "New"}</td>
                         <td className="p-4">
                           <div className="flex flex-col items-start gap-1">
@@ -522,7 +618,7 @@ export default function CashRequests() {
                           <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                             {req.status === "pending" && isAdmin && (
                               <>
-                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => approveMutation.mutate({ id: req.id })} disabled={approveMutation.isPending} title="Approve">
+                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => openApprove(req)} disabled={approveMutation.isPending} title="Approve & set amount to release">
                                   <Check className="h-4 w-4" />
                                 </Button>
                                 <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: req.id })} disabled={rejectMutation.isPending} title="Reject">
@@ -550,16 +646,12 @@ export default function CashRequests() {
                                 {req.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
                               </Button>
                             )}
-                            {canVerifyLiq && (
-                              <>
-                                <Button size="sm" variant="ghost" className="text-green-400 hover:text-green-300" onClick={() => verifyLiqMutation.mutate({ id: req.id })} disabled={verifyLiqMutation.isPending} title="Verify liquidation">
-                                  <Check className="h-4 w-4" />
-                                </Button>
-                                <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => sendBackLiquidation(req)} disabled={rejectLiqMutation.isPending} title="Send back for correction">
-                                  <X className="h-4 w-4" />
-                                </Button>
-                              </>
+                            {canReviewLiq && (
+                              <Button size="sm" variant="ghost" className="text-primary" onClick={() => setReviewingId(req.id)}>
+                                Review
+                              </Button>
                             )}
+                            {isDup && <span className="text-[10px] text-orange-400" title="Same requester, amount and purpose as another recent request">possible duplicate</span>}
                             {!hasActions && (
                               <span className="text-xs text-muted-foreground">{req.decidedByName || "-"}</span>
                             )}
@@ -671,6 +763,32 @@ export default function CashRequests() {
         </DialogContent>
       </Dialog>
 
+      {/* Approve & decide the amount to actually release (may exceed requested) */}
+      <Dialog open={!!approving} onOpenChange={(open) => { if (!open) setApproving(null); }}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">Approve {approving?.id}</DialogTitle></DialogHeader>
+          {approving && (
+            <div className="space-y-4">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Requested</span>
+                <span className="font-medium text-foreground">{formatPHP(approving.amount)}</span>
+              </div>
+              <div>
+                <Label>Amount to release *</Label>
+                <Input type="number" min="0" step="0.01" value={releaseAmount} onChange={(e) => setReleaseAmount(e.target.value)} className="bg-input border-border" />
+                <p className="text-xs text-muted-foreground mt-1">Defaults to the requested amount. Enter more if you're sending extra — this is what the receiver accounts for.</p>
+              </div>
+              {parseFloat(releaseAmount) > Number(approving.amount) && (
+                <p className="text-xs text-amber-400">Releasing {formatPHP(parseFloat(releaseAmount) - Number(approving.amount))} extra over the requested amount.</p>
+              )}
+              <Button className="w-full bg-primary text-primary-foreground" onClick={handleApprove} disabled={approveMutation.isPending}>
+                {approveMutation.isPending ? "Approving..." : "Approve & Release"}
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <DetailDialog
         open={!!viewingRequest}
         onOpenChange={(open) => !open && setViewingRequest(null)}
@@ -689,12 +807,25 @@ export default function CashRequests() {
                   : undefined,
                 full: true,
               },
-              { label: "Total", value: viewingRequest ? formatPHP(viewingRequest.amount) : undefined },
+              { label: "Requested", value: viewingRequest ? formatPHP(viewingRequest.amount) : undefined },
+              { label: "Released", value: viewingRequest?.accounting ? formatPHP(viewingRequest.accounting.released) : undefined, hidden: !viewingRequest?.accounting || Number(viewingRequest.accounting.released) === Number(viewingRequest.amount) },
               { label: "Record", value: viewingRequest ? (viewingRequest.isOldRecord ? "Old" : "New") : undefined },
               { label: "Month", value: viewingRequest ? `${MONTH_NAMES[viewingRequest.month - 1]} ${viewingRequest.year}` : undefined },
               { label: "Submitted", value: viewingRequest ? new Date(viewingRequest.createdAt).toLocaleDateString() : undefined },
             ],
           },
+          ...(viewingRequest?.accounting && viewingRequest.liquidation ? [{
+            title: "Money Position",
+            fields: [
+              { label: "Released", value: formatPHP(viewingRequest.accounting.released) },
+              { label: "Liquidated properly", value: formatPHP(viewingRequest.accounting.accepted) },
+              { label: "To be returned to office", value: formatPHP(viewingRequest.accounting.toReturn), hidden: !(Number(viewingRequest.accounting.toReturn) > 0) },
+              { label: "To be charged to receiver", value: formatPHP(viewingRequest.accounting.toCharge), hidden: !(Number(viewingRequest.accounting.toCharge) > 0) },
+              { label: "Office to reimburse receiver", value: formatPHP(viewingRequest.accounting.reimburse), hidden: !(Number(viewingRequest.accounting.reimburse) > 0) },
+              { label: "Cash already returned", value: formatPHP(viewingRequest.accounting.returned), hidden: !(Number(viewingRequest.accounting.returned) > 0) },
+              { label: "Lines still to review", value: String(viewingRequest.accounting.pendingLines), hidden: !(viewingRequest.accounting.pendingLines > 0) },
+            ],
+          }] : []),
           {
             title: "Trail",
             fields: [
@@ -709,12 +840,10 @@ export default function CashRequests() {
           ...(viewingRequest?.liquidation ? [{
             title: "Liquidation",
             fields: [
-              { label: "Status", value: viewingRequest.liquidation.status === "verified" ? "Verified ✓" : viewingRequest.liquidation.status === "rejected" ? "Sent back for correction" : "Submitted — awaiting verification" },
+              { label: "Status", value: viewingRequest.liquidation.status === "verified" ? "Reviewed ✓" : viewingRequest.liquidation.status === "rejected" ? "Sent back for correction" : "Submitted — awaiting review" },
               { label: "Total Spent", value: formatPHP(viewingRequest.liquidation.totalSpent) },
               { label: "Cash Returned", value: formatPHP(viewingRequest.liquidation.amountReturned) },
-              { label: "Overspend (to reimburse)", value: formatPHP(viewingRequest.liquidation.overspend), hidden: !(Number(viewingRequest.liquidation.overspend) > 0) },
-              { label: "Unaccounted", value: formatPHP(viewingRequest.liquidation.unaccounted), hidden: !(Number(viewingRequest.liquidation.unaccounted) > 0) },
-              { label: "Expenses", full: true, value: (viewingRequest.liquidation.items || []).map((it: any) => `${it.description}${it.payee ? ` — ${it.payee}` : ""} · ${formatPHP(it.amount)}`).join("   |   ") },
+              { label: "Expenses (per line)", full: true, value: (viewingRequest.liquidation.items || []).map((it: any) => `${(it.status ?? "pending") === "accepted" ? "✓" : (it.status ?? "pending") === "rejected" ? "✗" : "•"} ${it.description}${it.payee ? ` — ${it.payee}` : ""} · ${formatPHP(it.amount)}${it.status === "rejected" && it.rejectionReason ? ` (rejected: ${it.rejectionReason})` : ""}`).join("   |   ") },
               { label: "Submitted By", value: viewingRequest.liquidation.submittedByName },
               { label: "Verified By", value: viewingRequest.liquidation.verifiedByName, hidden: viewingRequest.liquidation.status !== "verified" },
               { label: "Sent back", value: viewingRequest.liquidation.rejectionReason, full: true, hidden: viewingRequest.liquidation.status !== "rejected" || !viewingRequest.liquidation.rejectionReason },
@@ -728,7 +857,7 @@ export default function CashRequests() {
         footerLeft={
           viewingRequest?.status === "pending" && isAdmin ? (
             <>
-              <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => approveMutation.mutate({ id: viewingRequest.id })} disabled={approveMutation.isPending}>
+              <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => openApprove(viewingRequest)} disabled={approveMutation.isPending}>
                 <Check className="h-4 w-4 mr-2" /> Approve
               </Button>
               <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: viewingRequest.id })} disabled={rejectMutation.isPending}>
@@ -740,17 +869,67 @@ export default function CashRequests() {
               {viewingRequest.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
             </Button>
           ) : viewingRequest && liqStateOf(viewingRequest) === "submitted" && isAdmin ? (
-            <>
-              <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => verifyLiqMutation.mutate({ id: viewingRequest.id })} disabled={verifyLiqMutation.isPending}>
-                <Check className="h-4 w-4 mr-2" /> Verify
-              </Button>
-              <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => sendBackLiquidation(viewingRequest)} disabled={rejectLiqMutation.isPending}>
-                <X className="h-4 w-4 mr-2" /> Send Back
-              </Button>
-            </>
+            <Button size="sm" variant="outline" className="border-border text-primary" onClick={() => { setReviewingId(viewingRequest.id); setViewingRequest(null); }}>
+              <Check className="h-4 w-4 mr-2" /> Review Liquidation
+            </Button>
           ) : undefined
         }
       />
+
+      {/* Per-line liquidation review (admin): accept/reject each expense, live money position */}
+      <Dialog open={!!reviewing} onOpenChange={(open) => { if (!open) setReviewingId(null); }}>
+        <DialogContent className="max-w-2xl bg-card border-border max-h-[90vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Review Liquidation — {reviewing?.id}</DialogTitle></DialogHeader>
+          {reviewing && (
+            <div className="space-y-4">
+              {reviewing.accounting && (
+                <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                  <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">Released</div><div className="font-bold text-foreground">{formatPHP(reviewing.accounting.released)}</div></div>
+                  <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">Liquidated properly</div><div className="font-bold text-green-400">{formatPHP(reviewing.accounting.accepted)}</div></div>
+                  <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">To be returned</div><div className="font-bold text-amber-400">{formatPHP(reviewing.accounting.toReturn)}</div></div>
+                  <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">To be charged</div><div className="font-bold text-red-400">{formatPHP(reviewing.accounting.toCharge)}</div></div>
+                </div>
+              )}
+              {Number(reviewing.accounting?.reimburse) > 0 && (
+                <p className="text-xs text-blue-400">Office to reimburse receiver: {formatPHP(reviewing.accounting.reimburse)} (accepted spend exceeded the cash released).</p>
+              )}
+              <div className="overflow-x-auto rounded-md border border-border">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-muted-foreground">
+                      <th className="text-left p-2 font-medium">Expense</th>
+                      <th className="text-right p-2 font-medium">Amount</th>
+                      <th className="text-center p-2 font-medium">Decision</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(reviewing.liquidation?.items ?? []).map((it: any, idx: number) => {
+                      const st = it.status ?? "pending";
+                      return (
+                        <tr key={idx} className="border-b border-border/50 last:border-0">
+                          <td className="p-2 text-foreground">{it.description}{it.payee ? <span className="text-xs text-muted-foreground"> — {it.payee}</span> : null}{st === "rejected" && it.rejectionReason ? <div className="text-[11px] text-red-400">Rejected: {it.rejectionReason}</div> : null}</td>
+                          <td className="p-2 text-right tabular-nums text-foreground">{formatPHP(it.amount)}</td>
+                          <td className="p-2">
+                            <div className="flex items-center justify-center gap-1">
+                              <Button size="sm" variant={st === "accepted" ? "default" : "ghost"} className={st === "accepted" ? "bg-green-600 text-white h-7 px-2" : "text-green-400 h-7 px-2"} disabled={reviewLineMutation.isPending} onClick={() => reviewLineMutation.mutate({ id: reviewing.id, index: idx, decision: "accepted" })} title="Accept"><Check className="h-4 w-4" /></Button>
+                              <Button size="sm" variant={st === "rejected" ? "default" : "ghost"} className={st === "rejected" ? "bg-red-600 text-white h-7 px-2" : "text-red-400 h-7 px-2"} disabled={reviewLineMutation.isPending} onClick={() => rejectLine(reviewing.id, idx)} title="Reject (charge to receiver)"><X className="h-4 w-4" /></Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" className="bg-green-600 text-white hover:bg-green-700" onClick={() => verifyLiqMutation.mutate({ id: reviewing.id })} disabled={verifyLiqMutation.isPending}><Check className="h-4 w-4 mr-1" /> Accept all remaining</Button>
+                <Button size="sm" variant="outline" className="border-border text-red-400" onClick={() => sendBackLiquidation(reviewing)} disabled={rejectLiqMutation.isPending}><X className="h-4 w-4 mr-1" /> Send whole thing back</Button>
+                <Button size="sm" variant="outline" className="border-border ml-auto" onClick={() => setReviewingId(null)}>Done</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

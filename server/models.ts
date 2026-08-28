@@ -795,6 +795,10 @@ export interface CashLiquidationItem {
   payee: string | null;          // vendor / person paid
   spentDate: Date | null;
   amount: string;                // actual amount spent on this line
+  // Admin's per-line decision. Absent = "pending" (not yet reviewed). Accepted =
+  // liquidated properly; rejected = disallowed, charged back to the receiver.
+  status?: "pending" | "accepted" | "rejected";
+  rejectionReason?: string | null;
 }
 
 // The accounting of a received cash request: how it was spent, what was
@@ -829,7 +833,11 @@ export interface CashRequest {
   items?: CashRequestItem[];
   purposeOptionId: number; // config_options row id, category "cash_request_purpose"
   purposeLabel: string; // denormalized at request time
-  amount: string; // total across all items
+  amount: string; // total requested across all items
+  // Cash the admin actually released, decided at approval — can exceed the
+  // requested amount ("a little extra"). Absent = same as `amount`. This is the
+  // baseline everything is accounted against once received.
+  releasedAmount?: string;
   isOldRecord: boolean;
   status: "pending" | "approved" | "rejected";
   received: boolean;
