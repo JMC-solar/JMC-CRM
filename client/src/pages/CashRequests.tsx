@@ -354,6 +354,7 @@ export default function CashRequests() {
     setSettleAmount(settling?.accounting ? String(Number(t2(settling.accounting, t))) : "");
   };
   const handleRecordSettle = () => {
+    if (!settling) return;
     const amt = parseFloat(settleAmount);
     if (!(amt > 0)) { toast.error("Enter an amount to record."); return; }
     recordSettlementMutation.mutate({ id: settling.id, type: settleType, amount: amt, date: settleDate || undefined, notes: settleNotes || undefined });
@@ -1064,7 +1065,7 @@ export default function CashRequests() {
                 <div>
                   <Label className="text-sm">History</Label>
                   <div className="mt-1 space-y-1">
-                    {settling.settlements.map((s: any, idx: number) => (
+                    {(settling.settlements ?? []).map((s: any, idx: number) => (
                       <div key={idx} className="flex items-center justify-between rounded-md border border-border/60 px-2 py-1 text-sm">
                         <span className="text-foreground">{settleTypeLabel[s.type] ?? s.type} — <span className="font-medium">{formatPHP(s.amount)}</span>{s.date ? <span className="text-xs text-muted-foreground"> · {new Date(s.date).toLocaleDateString()}</span> : null}{s.notes ? <span className="text-xs text-muted-foreground"> · {s.notes}</span> : null}</span>
                         <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-red-400 h-6 px-1" title="Remove" onClick={() => removeSettlementMutation.mutate({ id: settling.id, index: idx })} disabled={removeSettlementMutation.isPending}><Trash2 className="h-4 w-4" /></Button>
