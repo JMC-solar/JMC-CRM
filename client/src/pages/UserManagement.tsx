@@ -123,7 +123,7 @@ export default function UserManagement() {
 
   // Determine which roles the current user can create
   const creatableRoles = isAdmin
-    ? [{ value: "subadmin", label: "Sub Admin" }, { value: "purchaser", label: "Purchaser" }, { value: "staff", label: "Staff" }, { value: "sales_rep", label: "Sales Rep" }]
+    ? [{ value: "subadmin", label: "Sub Admin" }, { value: "auditor", label: "Auditor (Cash Requests only)" }, { value: "purchaser", label: "Purchaser" }, { value: "staff", label: "Staff" }, { value: "sales_rep", label: "Sales Rep" }]
     : isSubAdmin
     ? [{ value: "purchaser", label: "Purchaser" }, { value: "staff", label: "Staff" }, { value: "sales_rep", label: "Sales Rep" }]
     : [];
@@ -132,6 +132,7 @@ export default function UserManagement() {
     const variants: Record<string, string> = {
       admin: "bg-red-500/20 text-red-400 border-red-500/30",
       subadmin: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+      auditor: "bg-teal-500/20 text-teal-400 border-teal-500/30",
       purchaser: "bg-green-500/20 text-green-400 border-green-500/30",
       staff: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
       sales_rep: "bg-purple-500/20 text-purple-400 border-purple-500/30",
@@ -139,6 +140,7 @@ export default function UserManagement() {
     const labels: Record<string, string> = {
       admin: "Admin",
       subadmin: "Sub Admin",
+      auditor: "Auditor",
       purchaser: "Purchaser",
       staff: "Staff",
       sales_rep: "Sales Rep",
@@ -256,6 +258,7 @@ export default function UserManagement() {
                                       <SelectContent>
                                         <SelectItem value="admin">Admin</SelectItem>
                                         <SelectItem value="subadmin">Sub Admin</SelectItem>
+                                        <SelectItem value="auditor">Auditor (Cash Requests only)</SelectItem>
                                         <SelectItem value="purchaser">Purchaser</SelectItem>
                                         <SelectItem value="staff">Staff</SelectItem>
                                         <SelectItem value="sales_rep">Sales Rep</SelectItem>

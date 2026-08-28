@@ -43,3 +43,18 @@ export const adminProcedure = t.procedure.use(
     });
   }),
 );
+
+// Admin-level access that the Auditor role also has — used ONLY for cash-request
+// actions (approve/review/verify/settle). The auditor is a cash-side backup for
+// the admin; it deliberately does NOT unlock other admin-only areas.
+export const adminOrAuditorProcedure = t.procedure.use(
+  t.middleware(async opts => {
+    const { ctx, next } = opts;
+
+    if (!ctx.user || (ctx.user.role !== 'admin' && ctx.user.role !== 'auditor')) {
+      throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+    }
+
+    return next({ ctx: { ...ctx, user: ctx.user } });
+  }),
+);

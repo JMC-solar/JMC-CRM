@@ -191,7 +191,10 @@ const itemsOf = (req: any): any[] =>
 
 export default function CashRequests() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  // The Auditor is the admin's cash-side backup, so on THIS page it has the same
+  // powers as admin (approve / review / verify / settle / edit). Creating requests
+  // stays with sub-admins (the New Request button below is gated on isSubAdmin).
+  const isAdmin = user?.role === "admin" || user?.role === "auditor";
   const isSubAdmin = user?.role === "subadmin";
   const utils = trpc.useUtils();
 

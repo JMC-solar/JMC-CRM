@@ -1,7 +1,7 @@
 import { COOKIE_NAME } from "../shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
+import { publicProcedure, protectedProcedure, adminProcedure, adminOrAuditorProcedure, router } from "./_core/trpc";
 import {
   getUserById, getUserByUsername, listUsersRaw, createUser, updateUser, deleteUser,
 } from "./firestore-users";
@@ -3134,13 +3134,13 @@ export const appRouter = router({
       name: z.string().min(1),
       email: z.string().email().optional(),
       mobile: z.string().optional(),
-      role: z.enum(["admin", "subadmin", "purchaser", "staff", "sales_rep"]),
+      role: z.enum(["admin", "subadmin", "auditor", "purchaser", "staff", "sales_rep"]),
     })).mutation(async ({ input, ctx }) => {
       const { hashPassword, generateLocalOpenId } = await import("./localAuth");
       const currentRole = ctx.user.role;
       // Admin can create subadmin; SubAdmin can create purchaser, staff, sales_rep
-      if (currentRole === "admin" && !["subadmin", "purchaser", "staff", "sales_rep"].includes(input.role)) {
-        throw new Error("Admin can only create subadmin, purchaser, staff, or sales_rep accounts");
+      if (currentRole === "admin" && !["subadmin", "auditor", "purchaser", "staff", "sales_rep"].includes(input.role)) {
+        throw new Error("Admin can only create subadmin, auditor, purchaser, staff, or sales_rep accounts");
       }
       if (currentRole === "subadmin" && !["purchaser", "staff", "sales_rep"].includes(input.role)) {
         throw new Error("Sub Admin can only create purchaser, staff, or sales_rep accounts");
@@ -3168,7 +3168,7 @@ export const appRouter = router({
       await fsAudit(ctx.user.id, ctx.user.name, "create_user", "user", 0, `Created ${input.role} user: ${input.username}`);
       return { success: true };
     }),
-    updateRole: adminProcedure.input(z.object({ userId: z.number(), role: z.enum(["admin", "subadmin", "purchaser", "staff", "sales_rep"]) })).mutation(async ({ input, ctx }) => {
+    updateRole: adminProcedure.input(z.object({ userId: z.number(), role: z.enum(["admin", "subadmin", "auditor", "purchaser", "staff", "sales_rep"]) })).mutation(async ({ input, ctx }) => {
       await updateUser(input.userId, { role: input.role });
       await fsAudit(ctx.user.id, ctx.user.name, "update_role", "user", input.userId, `Changed role to ${input.role}`);
       return { success: true };
@@ -4215,7 +4215,7 @@ export const appRouter = router({
       const action = input.isOldRecord ? "Logged" : "Requested";
       await fsAudit(ctx.user.id, ctx.user.name, "create", "cash_request", id, `${action} ${money(total)} across ${items.length} entr${items.length === 1 ? 'y' : 'ies'} (${summary}) (${id})`);
 
-      const admins = (await listUsersRaw()).filter(u => u.role === 'admin');
+      const admins = (await listUsersRaw()).filter(u => u.role === 'admin' || u.role === 'auditor');
       const message = input.isOldRecord
         ? `${ctx.user.name || 'A sub-admin'} logged a completed cash request of ${money(total)} for ${summary} (${id}) — already received.`
         : `${ctx.user.name || 'A sub-admin'} requested ${money(total)} for ${summary} (${id})`;
@@ -4239,7 +4239,7 @@ export const appRouter = router({
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");
       const data = fsDocToDataRaw<CashRequest>(snap);
-      if (ctx.user.role !== 'admin' && data.status !== 'pending') {
+      if (ctx.user.role !== 'admin' && ctx.user.role !== 'auditor' && data.status !== 'pending') {
         throw new Error("This request has already been decided — only an admin can edit it now");
       }
 
@@ -4283,7 +4283,7 @@ export const appRouter = router({
 
     // The admin decides how much cash to actually release here — can exceed the
     // requested amount ("a little extra"). Defaults to the requested amount.
-    approve: adminProcedure.input(z.object({ id: z.string(), releasedAmount: z.number().nonnegative().optional() })).mutation(async ({ input, ctx }) => {
+    approve: adminOrAuditorProcedure.input(z.object({ id: z.string(), releasedAmount: z.number().nonnegative().optional() })).mutation(async ({ input, ctx }) => {
       const now = new Date();
       const reqData = await fdb().runTransaction(async tx => {
         const ref = fdb().collection("cash_requests").doc(input.id);
@@ -4306,7 +4306,7 @@ export const appRouter = router({
       return { success: true };
     }),
 
-    reject: adminProcedure.input(z.object({ id: z.string(), notes: z.string().optional() })).mutation(async ({ input, ctx }) => {
+    reject: adminOrAuditorProcedure.input(z.object({ id: z.string(), notes: z.string().optional() })).mutation(async ({ input, ctx }) => {
       const ref = fdb().collection("cash_requests").doc(input.id);
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found or already processed");
@@ -4413,7 +4413,7 @@ export const appRouter = router({
       };
       await ref.set({ liquidation, updatedAt: now }, { merge: true });
       await fsAudit(ctx.user.id, ctx.user.name, "liquidate", "cash_request", input.id, `Submitted liquidation for ${input.id}: spent ${money(totalSpent)} of ${money(received)}, returned ${money(amountReturned)}${overspend > 0 ? `, overspend ${money(overspend)}` : ''}${unaccounted > 0 ? `, unaccounted ${money(unaccounted)}` : ''}`);
-      const admins = (await listUsersRaw()).filter(u => u.role === 'admin');
+      const admins = (await listUsersRaw()).filter(u => u.role === 'admin' || u.role === 'auditor');
       await Promise.all(admins.map(a => fsInsertOne("notifications", {
         userId: a.id, type: "cash_liquidation_submitted",
         message: `${ctx.user.name || 'A sub-admin'} submitted a liquidation for ${input.id} — spent ${money(totalSpent)} of ${money(received)}${unaccounted > 0 ? `, ${money(unaccounted)} unaccounted` : ''}.`,
@@ -4425,7 +4425,7 @@ export const appRouter = router({
     // Admin reviews ONE liquidation line: accept it (liquidated properly) or
     // reject it (disallowed — charged back to the receiver). Once every line is
     // decided the liquidation is marked reviewed ("verified").
-    reviewLiquidationLine: adminProcedure.input(z.object({
+    reviewLiquidationLine: adminOrAuditorProcedure.input(z.object({
       id: z.string(),
       index: z.number().int().min(0),
       decision: z.enum(["accepted", "rejected", "pending"]),
@@ -4461,7 +4461,7 @@ export const appRouter = router({
     }),
 
     // Admin convenience: accept every remaining (pending) line at once.
-    verifyLiquidation: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+    verifyLiquidation: adminOrAuditorProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
       const ref = fdb().collection("cash_requests").doc(input.id);
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");
@@ -4485,7 +4485,7 @@ export const appRouter = router({
     }),
 
     // Admin sends a liquidation back for correction; the submitter can redo it.
-    rejectLiquidation: adminProcedure.input(z.object({ id: z.string(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+    rejectLiquidation: adminOrAuditorProcedure.input(z.object({ id: z.string(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
       const ref = fdb().collection("cash_requests").doc(input.id);
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");
@@ -4510,7 +4510,7 @@ export const appRouter = router({
     // Record a settlement that closes part of the outstanding balance: cash the
     // receiver returned, a rejected expense they repaid, or a reimbursement the
     // office paid them. Can't exceed what's outstanding for that bucket.
-    recordSettlement: adminProcedure.input(z.object({
+    recordSettlement: adminOrAuditorProcedure.input(z.object({
       id: z.string(),
       type: z.enum(["return", "charge", "reimburse"]),
       amount: z.number().positive(),
@@ -4549,7 +4549,7 @@ export const appRouter = router({
     }),
 
     // Undo a settlement entry (mistake correction).
-    removeSettlement: adminProcedure.input(z.object({ id: z.string(), index: z.number().int().min(0) })).mutation(async ({ input, ctx }) => {
+    removeSettlement: adminOrAuditorProcedure.input(z.object({ id: z.string(), index: z.number().int().min(0) })).mutation(async ({ input, ctx }) => {
       const ref = fdb().collection("cash_requests").doc(input.id);
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");

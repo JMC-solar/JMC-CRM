@@ -244,6 +244,10 @@ function DashboardLayoutContent({
   const userRole = user?.role;
   const isLimitedRole = ["purchaser", "staff", "sales_rep"].includes(userRole || "");
   const visibleSections = menuSections.filter((section) => {
+    // Auditor is scoped to Cash Requests only.
+    if (userRole === "auditor") {
+      return section.items.some((item) => item.path === "/cash-requests");
+    }
     // Limited roles (purchaser, staff, sales_rep) only see Inventory
     if (isLimitedRole) {
       return section.title === "Inventory";
@@ -255,6 +259,10 @@ function DashboardLayoutContent({
     // SubAdmin can see User Management but not Settings
     return true;
   }).map((section) => {
+    // Auditor: keep only the Cash Requests item.
+    if (userRole === "auditor") {
+      return { ...section, items: section.items.filter((item) => item.path === "/cash-requests") };
+    }
     if (isLimitedRole && section.title === "Inventory") {
       // Limited roles: only Items, Stock Transactions, Transfers, Suppliers, Purchase Orders
       return {
@@ -347,7 +355,7 @@ function DashboardLayoutContent({
                       {user?.name || "User"}
                     </p>
                     <p className="text-xs text-muted-foreground truncate mt-1">
-                      {user?.role === "admin" ? "Admin" : user?.role === "subadmin" ? "Sub-Admin" : user?.role === "purchaser" ? "Purchaser" : user?.role === "staff" ? "Staff" : user?.role === "sales_rep" ? "Sales Rep" : "User"}
+                      {user?.role === "admin" ? "Admin" : user?.role === "subadmin" ? "Sub-Admin" : user?.role === "auditor" ? "Auditor" : user?.role === "purchaser" ? "Purchaser" : user?.role === "staff" ? "Staff" : user?.role === "sales_rep" ? "Sales Rep" : "User"}
                     </p>
                   </div>
                 </button>
