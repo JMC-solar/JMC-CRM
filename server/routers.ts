@@ -280,6 +280,42 @@ function crItems(r: CashRequest): CashRequestItem[] {
   return [{ purposeOptionId: r.purposeOptionId, purposeLabel: r.purposeLabel, amount: r.amount }];
 }
 
+/**
+ * The money position of one cash request, keyed off the amount actually RELEASED
+ * (which can exceed the requested amount). Everything reconciles:
+ *   released = accepted + charged(rejected) + toReturn + alreadyReturned  (+ reimburse if the receiver overspent on accepted expenses).
+ *   - accepted  = expense lines the admin accepted ("liquidated properly")
+ *   - toCharge  = expense lines the admin rejected (disallowed — receiver repays)
+ *   - toReturn  = leftover cash still in hand (nothing to show for it, not returned)
+ *   - reimburse = office owes the receiver (accepted legit spend exceeded released)
+ */
+function cashRequestAccounting(r: CashRequest) {
+  const requested = Number(r.amount || 0);
+  const released = r.releasedAmount != null && r.releasedAmount !== "" ? Number(r.releasedAmount) : requested;
+  const liq = r.liquidation ?? null;
+  const items = liq?.items ?? [];
+  const sumBy = (pred: (s: string) => boolean) => items.reduce((s, it) => s + (pred(it.status ?? "pending") ? Number(it.amount || 0) : 0), 0);
+  const accepted = sumBy(st => st === "accepted");
+  const rejected = sumBy(st => st === "rejected");
+  const pendingAmount = sumBy(st => st === "pending");
+  const totalSpent = accepted + rejected + pendingAmount;
+  const returned = Number(liq?.amountReturned || 0);
+  const hasLiq = liq != null && items.length > 0;
+  // Before any liquidation is submitted we don't compute "owed" — the request is
+  // simply "awaiting liquidation". Owe figures only become meaningful once spending is reported.
+  const toReturn = hasLiq ? Math.max(0, released - totalSpent - returned) : 0;
+  const toCharge = rejected;
+  const reimburse = Math.max(0, accepted - released);
+  const pendingLines = items.filter(it => (it.status ?? "pending") === "pending").length;
+  const reviewed = liq != null && items.length > 0 && pendingLines === 0;
+  return {
+    requested: money(requested), released: money(released),
+    accepted: money(accepted), rejected: money(rejected), pendingAmount: money(pendingAmount),
+    returned: money(returned), toReturn: money(toReturn), toCharge: money(toCharge), reimburse: money(reimburse),
+    pendingLines, reviewed,
+  };
+}
+
 /** Recompute a PO's paidAmount + paymentStatus from its current payments. Call after any add/edit/delete of a payment so totals never drift. */
 async function recomputePoTotals(purchaseOrderId: number): Promise<void> {
   const [payments, po] = await Promise.all([
@@ -4098,7 +4134,7 @@ export const appRouter = router({
       // Ascending by id groups naturally by month then monthSeq (cr-MMNNYYY, fixed-width).
       return requests
         .sort((a, b) => a.id.localeCompare(b.id))
-        .map(r => ({ ...r, items: crItems(r) }));
+        .map(r => ({ ...r, items: crItems(r), accounting: cashRequestAccounting(r) }));
     }),
 
     // The cr-MMNNYYY number is reserved and the doc written in one atomic transaction,
@@ -4227,7 +4263,9 @@ export const appRouter = router({
       return { success: true };
     }),
 
-    approve: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
+    // The admin decides how much cash to actually release here — can exceed the
+    // requested amount ("a little extra"). Defaults to the requested amount.
+    approve: adminProcedure.input(z.object({ id: z.string(), releasedAmount: z.number().nonnegative().optional() })).mutation(async ({ input, ctx }) => {
       const now = new Date();
       const reqData = await fdb().runTransaction(async tx => {
         const ref = fdb().collection("cash_requests").doc(input.id);
@@ -4235,14 +4273,16 @@ export const appRouter = router({
         if (!snap.exists) throw new Error("Cash request not found or already processed");
         const data = fsDocToDataRaw<CashRequest>(snap);
         if (data.status !== 'pending') throw new Error("Cash request not found or already processed");
-        tx.set(ref, { status: 'approved', decidedBy: ctx.user.id, decidedByName: ctx.user.name || 'Admin', decidedAt: now, updatedAt: now }, { merge: true });
-        return data;
+        const released = input.releasedAmount != null ? money(input.releasedAmount) : data.amount;
+        tx.set(ref, { status: 'approved', releasedAmount: released, decidedBy: ctx.user.id, decidedByName: ctx.user.name || 'Admin', decidedAt: now, updatedAt: now }, { merge: true });
+        return { ...data, releasedAmount: released };
       });
 
-      await fsAudit(ctx.user.id, ctx.user.name, "approve", "cash_request", input.id, `Approved cash request ${input.id}`);
+      const extra = Number(reqData.releasedAmount || 0) - Number(reqData.amount || 0);
+      await fsAudit(ctx.user.id, ctx.user.name, "approve", "cash_request", input.id, `Approved cash request ${input.id}; released ${money(Number(reqData.releasedAmount || 0))}${extra > 0 ? ` (${money(extra)} extra over requested)` : ''}`);
       await fsInsertOne("notifications", {
         userId: reqData.requestedBy, type: "cash_request_approved",
-        message: `Your cash request ${input.id} (${reqData.purposeLabel}) was approved.`,
+        message: `Your cash request ${input.id} (${reqData.purposeLabel}) was approved — ${money(Number(reqData.releasedAmount || 0))} to release.`,
         link: "/cash-requests", entityId: input.id, read: false,
       });
       return { success: true };
@@ -4332,8 +4372,10 @@ export const appRouter = router({
         payee: it.payee ?? null,
         spentDate: it.spentDate ? new Date(it.spentDate) : null,
         amount: money(it.amount),
+        status: "pending", rejectionReason: null,
       }));
-      const received = Number(data.amount || 0);
+      // Account against the RELEASED amount (the extra the admin decided), not just requested.
+      const received = data.releasedAmount != null && data.releasedAmount !== "" ? Number(data.releasedAmount) : Number(data.amount || 0);
       const totalSpent = input.items.reduce((s, it) => s + it.amount, 0);
       const amountReturned = input.amountReturned ?? 0;
       const overspend = Math.max(0, totalSpent - received);
@@ -4362,22 +4404,60 @@ export const appRouter = router({
       return { success: true };
     }),
 
-    // Admin signs off that the liquidation + accounting is correct — the control
-    // that confirms the money went where it was requested.
+    // Admin reviews ONE liquidation line: accept it (liquidated properly) or
+    // reject it (disallowed — charged back to the receiver). Once every line is
+    // decided the liquidation is marked reviewed ("verified").
+    reviewLiquidationLine: adminProcedure.input(z.object({
+      id: z.string(),
+      index: z.number().int().min(0),
+      decision: z.enum(["accepted", "rejected", "pending"]),
+      reason: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (!data.liquidation) throw new Error("No liquidation to review");
+      const items = (data.liquidation.items ?? []).map((it, i) => i === input.index
+        ? { ...it, status: input.decision, rejectionReason: input.decision === "rejected" ? (input.reason ?? null) : null }
+        : it);
+      if (input.index >= items.length) throw new Error("Line not found");
+      const allDecided = items.length > 0 && items.every(it => (it.status ?? "pending") !== "pending");
+      const now = new Date();
+      const liquidation: CashLiquidation = {
+        ...data.liquidation,
+        items,
+        status: allDecided ? "verified" : "submitted",
+        verifiedBy: allDecided ? ctx.user.id : null,
+        verifiedByName: allDecided ? (ctx.user.name || "Admin") : null,
+        verifiedAt: allDecided ? now : null,
+      };
+      await ref.set({ liquidation, updatedAt: now }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "review", "cash_request", input.id, `${input.decision === "accepted" ? "Accepted" : input.decision === "rejected" ? "Rejected" : "Reset"} liquidation line ${input.index + 1} on ${input.id}`);
+      if (allDecided && data.liquidation.submittedBy) await fsInsertOne("notifications", {
+        userId: data.liquidation.submittedBy, type: "cash_liquidation_verified",
+        message: `Your liquidation for cash request ${input.id} has been fully reviewed.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    // Admin convenience: accept every remaining (pending) line at once.
     verifyLiquidation: adminProcedure.input(z.object({ id: z.string() })).mutation(async ({ input, ctx }) => {
       const ref = fdb().collection("cash_requests").doc(input.id);
       const snap = await ref.get();
       if (!snap.exists) throw new Error("Cash request not found");
       const data = fsDocToDataRaw<CashRequest>(snap);
-      if (!data.liquidation || data.liquidation.status !== 'submitted') throw new Error("No liquidation awaiting verification");
+      if (!data.liquidation || !data.liquidation.items?.length) throw new Error("No liquidation to review");
       const now = new Date();
+      const items = data.liquidation.items.map(it => (it.status ?? "pending") === "pending" ? { ...it, status: "accepted" as const, rejectionReason: null } : it);
       const liquidation: CashLiquidation = {
-        ...data.liquidation,
+        ...data.liquidation, items,
         status: "verified", rejectionReason: null,
         verifiedBy: ctx.user.id, verifiedByName: ctx.user.name || 'Admin', verifiedAt: now,
       };
       await ref.set({ liquidation, updatedAt: now }, { merge: true });
-      await fsAudit(ctx.user.id, ctx.user.name, "verify", "cash_request", input.id, `Verified liquidation for ${input.id}`);
+      await fsAudit(ctx.user.id, ctx.user.name, "verify", "cash_request", input.id, `Accepted all liquidation lines for ${input.id}`);
       if (data.liquidation.submittedBy) await fsInsertOne("notifications", {
         userId: data.liquidation.submittedBy, type: "cash_liquidation_verified",
         message: `Your liquidation for cash request ${input.id} was verified.`,
