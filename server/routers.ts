@@ -64,6 +64,7 @@ import type {
   CashRequestItem,
   CashLiquidation,
   CashLiquidationItem,
+  CashSettlementEntry,
   Notification,
   RetailSale,
   RetailRemittance,
@@ -308,11 +309,28 @@ function cashRequestAccounting(r: CashRequest) {
   const reimburse = Math.max(0, accepted - released);
   const pendingLines = items.filter(it => (it.status ?? "pending") === "pending").length;
   const reviewed = liq != null && items.length > 0 && pendingLines === 0;
+
+  // Settlements recorded against each owed bucket close the outstanding balance.
+  const settlements = r.settlements ?? [];
+  const settledBy = (t: string) => settlements.reduce((s, e) => s + (e.type === t ? Number(e.amount || 0) : 0), 0);
+  const settledReturn = settledBy("return");
+  const settledCharge = settledBy("charge");
+  const settledReimburse = settledBy("reimburse");
+  const outstandingReturn = Math.max(0, toReturn - settledReturn);
+  const outstandingCharge = Math.max(0, toCharge - settledCharge);
+  const outstandingReimburse = Math.max(0, reimburse - settledReimburse);
+  const outstandingTotal = outstandingReturn + outstandingCharge + outstandingReimburse;
+  // A reviewed request with no remaining owed amounts is fully settled.
+  const settled = reviewed && outstandingTotal === 0;
+
   return {
     requested: money(requested), released: money(released),
     accepted: money(accepted), rejected: money(rejected), pendingAmount: money(pendingAmount),
     returned: money(returned), toReturn: money(toReturn), toCharge: money(toCharge), reimburse: money(reimburse),
-    pendingLines, reviewed,
+    settledReturn: money(settledReturn), settledCharge: money(settledCharge), settledReimburse: money(settledReimburse),
+    outstandingReturn: money(outstandingReturn), outstandingCharge: money(outstandingCharge), outstandingReimburse: money(outstandingReimburse),
+    outstandingTotal: money(outstandingTotal),
+    pendingLines, reviewed, settled,
   };
 }
 
@@ -4486,6 +4504,61 @@ export const appRouter = router({
         message: `Your liquidation for cash request ${input.id} was sent back for correction${input.reason ? `: ${input.reason}` : ''}.`,
         link: "/cash-requests", entityId: input.id, read: false,
       });
+      return { success: true };
+    }),
+
+    // Record a settlement that closes part of the outstanding balance: cash the
+    // receiver returned, a rejected expense they repaid, or a reimbursement the
+    // office paid them. Can't exceed what's outstanding for that bucket.
+    recordSettlement: adminProcedure.input(z.object({
+      id: z.string(),
+      type: z.enum(["return", "charge", "reimburse"]),
+      amount: z.number().positive(),
+      date: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      const acct = cashRequestAccounting(data);
+      const outstanding = input.type === "return" ? Number(acct.outstandingReturn)
+        : input.type === "charge" ? Number(acct.outstandingCharge)
+        : Number(acct.outstandingReimburse);
+      if (outstanding <= 0) throw new Error(`Nothing outstanding to settle for "${input.type}".`);
+      if (input.amount > outstanding + 0.005) throw new Error(`Amount exceeds the ${money(outstanding)} outstanding.`);
+      const now = new Date();
+      const entry: CashSettlementEntry = {
+        type: input.type, amount: money(input.amount),
+        date: input.date ? new Date(input.date) : now,
+        notes: input.notes ?? null,
+        recordedBy: ctx.user.id, recordedByName: ctx.user.name || "Admin", createdAt: now,
+      };
+      const settlements = [...(data.settlements ?? []), entry];
+      await ref.set({ settlements, updatedAt: now }, { merge: true });
+      const label = input.type === "return" ? "cash returned" : input.type === "charge" ? "charge repaid" : "reimbursement paid";
+      await fsAudit(ctx.user.id, ctx.user.name, "settle", "cash_request", input.id, `Recorded ${label} of ${money(input.amount)} on ${input.id}`);
+      // Notify the receiver (or requester) that their balance changed.
+      const notifyId = data.receivedBy ?? data.requestedBy;
+      if (notifyId && notifyId !== ctx.user.id) await fsInsertOne("notifications", {
+        userId: notifyId, type: "cash_settlement_recorded",
+        message: `A ${label} of ${money(input.amount)} was recorded on cash request ${input.id}.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    // Undo a settlement entry (mistake correction).
+    removeSettlement: adminProcedure.input(z.object({ id: z.string(), index: z.number().int().min(0) })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      const settlements = [...(data.settlements ?? [])];
+      if (input.index < 0 || input.index >= settlements.length) throw new Error("Settlement entry not found");
+      const [removed] = settlements.splice(input.index, 1);
+      await ref.set({ settlements, updatedAt: new Date() }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "settle", "cash_request", input.id, `Removed a ${removed?.type} settlement of ${money(Number(removed?.amount || 0))} on ${input.id}`);
       return { success: true };
     }),
 

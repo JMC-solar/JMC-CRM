@@ -165,6 +165,10 @@ function liqStateOf(req: any): "n/a" | "awaiting" | "submitted" | "verified" {
   return "awaiting";
 }
 
+// The outstanding amount for a settlement type, from a request's accounting.
+const t2 = (a: any, t: string) => t === "return" ? a.outstandingReturn : t === "charge" ? a.outstandingCharge : a.outstandingReimburse;
+const settleTypeLabel: Record<string, string> = { return: "Cash returned to office", charge: "Charge repaid by receiver", reimburse: "Reimbursement paid by office" };
+
 // Sorts by the request's *attributed* month/year (not raw createdAt) — an old/backfilled
 // record tagged March belongs with March, regardless of when it was actually entered.
 // Ties within the same month/year break by monthSeq (entry order).
@@ -210,6 +214,12 @@ export default function CashRequests() {
   const [releaseAmount, setReleaseAmount] = useState("");
   // Per-line liquidation review (admin) — track by id so it stays fresh on refetch.
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+  // Settlement — record returns / charge repayments / reimbursements.
+  const [settlingId, setSettlingId] = useState<string | null>(null);
+  const [settleType, setSettleType] = useState<"return" | "charge" | "reimburse">("return");
+  const [settleAmount, setSettleAmount] = useState("");
+  const [settleDate, setSettleDate] = useState("");
+  const [settleNotes, setSettleNotes] = useState("");
   // Search + filters on the main list.
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -314,9 +324,55 @@ export default function CashRequests() {
     onSuccess: () => { utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); },
     onError: (err: any) => toast.error(err.message),
   });
+  const recordSettlementMutation = trpc.cashRequests.recordSettlement.useMutation({
+    onSuccess: () => { toast.success("Settlement recorded"); setSettleAmount(""); setSettleNotes(""); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const removeSettlementMutation = trpc.cashRequests.removeSettlement.useMutation({
+    onSuccess: () => { toast.success("Settlement removed"); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
 
   // Keep the review dialog pointed at the latest data as lines are decided.
   const reviewing = reviewingId ? (requests ?? []).find((r: any) => r.id === reviewingId) : null;
+  // Settlement dialog target (kept fresh from the live list).
+  const settling = settlingId ? (requests ?? []).find((r: any) => r.id === settlingId) : null;
+  const settleOutstanding = (t: string) => settling?.accounting
+    ? Number(t === "return" ? settling.accounting.outstandingReturn : t === "charge" ? settling.accounting.outstandingCharge : settling.accounting.outstandingReimburse)
+    : 0;
+  const openSettle = (req: any) => {
+    setSettlingId(req.id);
+    const a = req.accounting;
+    const firstType = a && Number(a.outstandingReturn) > 0 ? "return" : a && Number(a.outstandingCharge) > 0 ? "charge" : a && Number(a.outstandingReimburse) > 0 ? "reimburse" : "return";
+    setSettleType(firstType as any);
+    setSettleAmount(a ? String(Number(t2(a, firstType))) : "");
+    setSettleDate(new Date().toISOString().slice(0, 10));
+    setSettleNotes("");
+  };
+  const onSettleTypeChange = (t: "return" | "charge" | "reimburse") => {
+    setSettleType(t);
+    setSettleAmount(settling?.accounting ? String(Number(t2(settling.accounting, t))) : "");
+  };
+  const handleRecordSettle = () => {
+    const amt = parseFloat(settleAmount);
+    if (!(amt > 0)) { toast.error("Enter an amount to record."); return; }
+    recordSettlementMutation.mutate({ id: settling.id, type: settleType, amount: amt, date: settleDate || undefined, notes: settleNotes || undefined });
+  };
+
+  // Per-receiver outstanding balances across all their requests.
+  const receiverBalances = useMemo(() => {
+    const map = new Map<string, { owes: number; owed: number }>();
+    for (const r of (requests ?? []) as any[]) {
+      const a = r.accounting; if (!a) continue;
+      const who = r.receivedByName || r.requestedByName || "—";
+      const owes = Number(a.outstandingReturn) + Number(a.outstandingCharge);
+      const owed = Number(a.outstandingReimburse);
+      if (owes === 0 && owed === 0) continue;
+      const cur = map.get(who) ?? { owes: 0, owed: 0 };
+      cur.owes += owes; cur.owed += owed; map.set(who, cur);
+    }
+    return Array.from(map.entries()).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.owes - a.owes);
+  }, [requests]);
   const openApprove = (req: any) => { setApproving(req); setReleaseAmount(String(req.amount ?? "")); };
   const handleApprove = () => {
     const amt = parseFloat(releaseAmount);
@@ -510,6 +566,23 @@ export default function CashRequests() {
         </Card>
       </div>
 
+      {receiverBalances.length > 0 && (
+        <Card className="bg-card border-border">
+          <CardContent className="pt-4">
+            <div className="text-sm font-medium text-foreground mb-2">Outstanding by receiver</div>
+            <div className="flex flex-wrap gap-2">
+              {receiverBalances.map((rb) => (
+                <div key={rb.name} className="rounded-md border border-border px-3 py-1.5 text-sm">
+                  <span className="text-foreground">{rb.name}</span>
+                  {rb.owes > 0 && <span className="ml-2 text-amber-400">owes office {formatPHP(rb.owes)}</span>}
+                  {rb.owed > 0 && <span className="ml-2 text-blue-400">office owes {formatPHP(rb.owed)}</span>}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="flex flex-wrap gap-3">
         <div className="relative min-w-[240px] flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -650,6 +723,14 @@ export default function CashRequests() {
                               <Button size="sm" variant="ghost" className="text-primary" onClick={() => setReviewingId(req.id)}>
                                 Review
                               </Button>
+                            )}
+                            {isAdmin && Number(req.accounting?.outstandingTotal) > 0 && (
+                              <Button size="sm" variant="ghost" className="text-amber-400 hover:text-amber-300" onClick={() => openSettle(req)}>
+                                Settle
+                              </Button>
+                            )}
+                            {req.accounting?.settled && liqStateOf(req) === "verified" && (
+                              <span className="text-[10px] text-green-400" title="Reviewed and fully settled">settled ✓</span>
                             )}
                             {isDup && <span className="text-[10px] text-orange-400" title="Same requester, amount and purpose as another recent request">possible duplicate</span>}
                             {!hasActions && (
@@ -819,11 +900,12 @@ export default function CashRequests() {
             fields: [
               { label: "Released", value: formatPHP(viewingRequest.accounting.released) },
               { label: "Liquidated properly", value: formatPHP(viewingRequest.accounting.accepted) },
-              { label: "To be returned to office", value: formatPHP(viewingRequest.accounting.toReturn), hidden: !(Number(viewingRequest.accounting.toReturn) > 0) },
-              { label: "To be charged to receiver", value: formatPHP(viewingRequest.accounting.toCharge), hidden: !(Number(viewingRequest.accounting.toCharge) > 0) },
-              { label: "Office to reimburse receiver", value: formatPHP(viewingRequest.accounting.reimburse), hidden: !(Number(viewingRequest.accounting.reimburse) > 0) },
-              { label: "Cash already returned", value: formatPHP(viewingRequest.accounting.returned), hidden: !(Number(viewingRequest.accounting.returned) > 0) },
+              { label: "To be returned to office", value: `${formatPHP(viewingRequest.accounting.outstandingReturn)}${Number(viewingRequest.accounting.settledReturn) > 0 ? ` (of ${formatPHP(viewingRequest.accounting.toReturn)}, ${formatPHP(viewingRequest.accounting.settledReturn)} returned)` : ""}`, hidden: !(Number(viewingRequest.accounting.toReturn) > 0) },
+              { label: "To be charged to receiver", value: `${formatPHP(viewingRequest.accounting.outstandingCharge)}${Number(viewingRequest.accounting.settledCharge) > 0 ? ` (of ${formatPHP(viewingRequest.accounting.toCharge)}, ${formatPHP(viewingRequest.accounting.settledCharge)} repaid)` : ""}`, hidden: !(Number(viewingRequest.accounting.toCharge) > 0) },
+              { label: "Office to reimburse receiver", value: `${formatPHP(viewingRequest.accounting.outstandingReimburse)}${Number(viewingRequest.accounting.settledReimburse) > 0 ? ` (of ${formatPHP(viewingRequest.accounting.reimburse)}, ${formatPHP(viewingRequest.accounting.settledReimburse)} paid)` : ""}`, hidden: !(Number(viewingRequest.accounting.reimburse) > 0) },
+              { label: "Outstanding balance", value: Number(viewingRequest.accounting.outstandingTotal) > 0 ? formatPHP(viewingRequest.accounting.outstandingTotal) : (viewingRequest.accounting.settled ? "Settled ✓" : formatPHP(0)) },
               { label: "Lines still to review", value: String(viewingRequest.accounting.pendingLines), hidden: !(viewingRequest.accounting.pendingLines > 0) },
+              { label: "Settlements", full: true, hidden: !(viewingRequest.settlements?.length), value: (viewingRequest.settlements ?? []).map((s: any) => `${settleTypeLabel[s.type] ?? s.type}: ${formatPHP(s.amount)}${s.date ? ` (${new Date(s.date).toLocaleDateString()})` : ""}`).join("   |   ") },
             ],
           }] : []),
           {
@@ -871,6 +953,10 @@ export default function CashRequests() {
           ) : viewingRequest && liqStateOf(viewingRequest) === "submitted" && isAdmin ? (
             <Button size="sm" variant="outline" className="border-border text-primary" onClick={() => { setReviewingId(viewingRequest.id); setViewingRequest(null); }}>
               <Check className="h-4 w-4 mr-2" /> Review Liquidation
+            </Button>
+          ) : viewingRequest && isAdmin && Number(viewingRequest.accounting?.outstandingTotal) > 0 ? (
+            <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => { openSettle(viewingRequest); setViewingRequest(null); }}>
+              Settle Balance
             </Button>
           ) : undefined
         }
@@ -925,6 +1011,71 @@ export default function CashRequests() {
                 <Button size="sm" className="bg-green-600 text-white hover:bg-green-700" onClick={() => verifyLiqMutation.mutate({ id: reviewing.id })} disabled={verifyLiqMutation.isPending}><Check className="h-4 w-4 mr-1" /> Accept all remaining</Button>
                 <Button size="sm" variant="outline" className="border-border text-red-400" onClick={() => sendBackLiquidation(reviewing)} disabled={rejectLiqMutation.isPending}><X className="h-4 w-4 mr-1" /> Send whole thing back</Button>
                 <Button size="sm" variant="outline" className="border-border ml-auto" onClick={() => setReviewingId(null)}>Done</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Settlement — record returns / charge repayments / reimbursements that close the balance */}
+      <Dialog open={!!settling} onOpenChange={(open) => { if (!open) setSettlingId(null); }}>
+        <DialogContent className="max-w-lg bg-card border-border max-h-[90vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="text-foreground">Settle Balance — {settling?.id}</DialogTitle></DialogHeader>
+          {settling && settling.accounting && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-2 text-sm">
+                <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">To return</div><div className="font-bold text-amber-400">{formatPHP(settling.accounting.outstandingReturn)}</div></div>
+                <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">To charge</div><div className="font-bold text-red-400">{formatPHP(settling.accounting.outstandingCharge)}</div></div>
+                <div className="rounded-md border border-border p-2"><div className="text-[11px] text-muted-foreground">To reimburse</div><div className="font-bold text-blue-400">{formatPHP(settling.accounting.outstandingReimburse)}</div></div>
+              </div>
+
+              <div className="space-y-2 rounded-md border border-border p-3">
+                <div>
+                  <Label className="text-sm">What are you recording?</Label>
+                  <Select value={settleType} onValueChange={(v) => onSettleTypeChange(v as any)}>
+                    <SelectTrigger className="bg-input border-border"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="return" disabled={settleOutstanding("return") <= 0}>Cash returned to office{settleOutstanding("return") > 0 ? ` (${formatPHP(settling.accounting.outstandingReturn)} left)` : " — nothing due"}</SelectItem>
+                      <SelectItem value="charge" disabled={settleOutstanding("charge") <= 0}>Charge repaid by receiver{settleOutstanding("charge") > 0 ? ` (${formatPHP(settling.accounting.outstandingCharge)} left)` : " — nothing due"}</SelectItem>
+                      <SelectItem value="reimburse" disabled={settleOutstanding("reimburse") <= 0}>Reimbursement paid by office{settleOutstanding("reimburse") > 0 ? ` (${formatPHP(settling.accounting.outstandingReimburse)} left)` : " — nothing due"}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <Label className="text-sm">Amount</Label>
+                    <Input type="number" min="0" step="0.01" value={settleAmount} onChange={(e) => setSettleAmount(e.target.value)} className="bg-input border-border" />
+                  </div>
+                  <div className="flex-1">
+                    <Label className="text-sm">Date</Label>
+                    <Input type="date" value={settleDate} onChange={(e) => setSettleDate(e.target.value)} className="bg-input border-border" />
+                  </div>
+                </div>
+                <div>
+                  <Label className="text-sm">Notes</Label>
+                  <Input value={settleNotes} onChange={(e) => setSettleNotes(e.target.value)} className="bg-input border-border" placeholder="e.g. returned in cash, or deducted from salary" />
+                </div>
+                <Button className="w-full bg-primary text-primary-foreground" onClick={handleRecordSettle} disabled={recordSettlementMutation.isPending || settleOutstanding(settleType) <= 0}>
+                  {recordSettlementMutation.isPending ? "Recording..." : "Record Settlement"}
+                </Button>
+              </div>
+
+              {(settling.settlements?.length ?? 0) > 0 && (
+                <div>
+                  <Label className="text-sm">History</Label>
+                  <div className="mt-1 space-y-1">
+                    {settling.settlements.map((s: any, idx: number) => (
+                      <div key={idx} className="flex items-center justify-between rounded-md border border-border/60 px-2 py-1 text-sm">
+                        <span className="text-foreground">{settleTypeLabel[s.type] ?? s.type} — <span className="font-medium">{formatPHP(s.amount)}</span>{s.date ? <span className="text-xs text-muted-foreground"> · {new Date(s.date).toLocaleDateString()}</span> : null}{s.notes ? <span className="text-xs text-muted-foreground"> · {s.notes}</span> : null}</span>
+                        <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-red-400 h-6 px-1" title="Remove" onClick={() => removeSettlementMutation.mutate({ id: settling.id, index: idx })} disabled={removeSettlementMutation.isPending}><Trash2 className="h-4 w-4" /></Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" className="border-border" onClick={() => setSettlingId(null)}>Done</Button>
               </div>
             </div>
           )}

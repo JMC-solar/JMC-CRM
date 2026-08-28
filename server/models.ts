@@ -821,6 +821,20 @@ export interface CashLiquidation {
   verifiedAt: Date | null;
 }
 
+// One settlement event that closes part of a cash request's outstanding balance:
+//   return    = receiver handed leftover cash back to the office
+//   charge    = receiver repaid a disallowed (rejected) expense
+//   reimburse = office paid the receiver back (they overspent on accepted items)
+export interface CashSettlementEntry {
+  type: "return" | "charge" | "reimburse";
+  amount: string;
+  date: Date | null;
+  notes: string | null;
+  recordedBy: number | null;
+  recordedByName: string | null;
+  createdAt: Date;
+}
+
 export interface CashRequest {
   id: string; // "cr-0701053" — the Firestore doc id itself, not a numeric surrogate
   month: number; // 1-12, month this request is attributed to
@@ -857,6 +871,9 @@ export interface CashRequest {
   rejectionReason: string | null;
   // Filled once the received cash is accounted for. Absent = not yet liquidated.
   liquidation?: CashLiquidation | null;
+  // Recorded returns / charge repayments / reimbursements that close the
+  // outstanding balance. Absent = nothing settled yet.
+  settlements?: CashSettlementEntry[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -865,7 +882,7 @@ export interface CashRequest {
 export interface Notification {
   id: number;
   userId: number;
-  type: "cash_request_created" | "cash_request_approved" | "cash_request_rejected" | "cash_request_received" | "cash_liquidation_submitted" | "cash_liquidation_verified" | "cash_liquidation_rejected";
+  type: "cash_request_created" | "cash_request_approved" | "cash_request_rejected" | "cash_request_received" | "cash_liquidation_submitted" | "cash_liquidation_verified" | "cash_liquidation_rejected" | "cash_settlement_recorded";
   message: string;
   link: string | null;
   entityId: string | null;
