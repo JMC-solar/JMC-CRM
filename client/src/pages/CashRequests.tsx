@@ -323,6 +323,10 @@ export default function CashRequests() {
     onSuccess: () => { toast.success("Sent back for correction"); setViewingRequest(null); setReviewingId(null); invalidateAll(); },
     onError: (err: any) => toast.error(err.message),
   });
+  const reopenLiqMutation = trpc.cashRequests.reopenLiquidation.useMutation({
+    onSuccess: () => { toast.success("Reopened — sent back to the receiver to add/adjust"); setViewingRequest(null); setReviewingId(null); invalidateAll(); },
+    onError: (err: any) => toast.error(err.message),
+  });
   const reviewLineMutation = trpc.cashRequests.reviewLiquidationLine.useMutation({
     onSuccess: () => { utils.cashRequests.list.invalidate(); utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); },
     onError: (err: any) => toast.error(err.message),
@@ -430,6 +434,15 @@ export default function CashRequests() {
     if (reason === null) return; // cancelled
     rejectLiqMutation.mutate({ id: req.id, reason: reason || undefined });
   };
+  const reopenLiquidation = (req: any) => {
+    const reason = window.prompt("Reopen this liquidation so the receiver can add/adjust. Reason (optional):");
+    if (reason === null) return; // cancelled
+    reopenLiqMutation.mutate({ id: req.id, reason: reason || undefined });
+  };
+  // Whether the admin can reopen (there is a liquidation not already open, and nothing settled yet — the server enforces this too).
+  const canReopen = (req: any) => isAdmin && req.liquidation && (req.liquidation.status === "submitted" || req.liquidation.status === "verified");
+  // Whether a line has been reviewed yet (once it has, the receiver can't overwrite — admin must reopen).
+  const reviewStartedOf = (req: any) => (req.liquidation?.items ?? []).some((it: any) => (it.status ?? "pending") !== "pending");
 
   const handleCreate = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -650,10 +663,12 @@ export default function CashRequests() {
                     const editable = canEdit(req);
                     const deletable = canDelete(req);
                     const liqState = liqStateOf(req);
-                    const canLiquidate = liqState === "awaiting" && (isSubAdmin || isAdmin);
+                    // The receiver can still edit/add while it's submitted and the admin hasn't started reviewing.
+                    const canLiquidate = (isSubAdmin || isAdmin) && (liqState === "awaiting" || (liqState === "submitted" && !reviewStartedOf(req)));
                     const canReviewLiq = liqState === "submitted" && isAdmin;
+                    const reopenable = canReopen(req);
                     const isDup = duplicateIds.has(req.id);
-                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable || canLiquidate || canReviewLiq;
+                    const hasActions = (req.status === "pending" && isAdmin) || canMarkReceived || editable || deletable || canLiquidate || canReviewLiq || reopenable;
                     const entries = itemsOf(req);
                     return (
                       <tr
@@ -720,7 +735,7 @@ export default function CashRequests() {
                             )}
                             {canLiquidate && (
                               <Button size="sm" variant="ghost" className="text-amber-400 hover:text-amber-300" onClick={() => openLiquidate(req)}>
-                                {req.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
+                                {liqState === "submitted" ? "Edit / Add Liquidation" : req.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
                               </Button>
                             )}
                             {canReviewLiq && (
@@ -731,6 +746,11 @@ export default function CashRequests() {
                             {isAdmin && Number(req.accounting?.outstandingTotal) > 0 && (
                               <Button size="sm" variant="ghost" className="text-amber-400 hover:text-amber-300" onClick={() => openSettle(req)}>
                                 Settle
+                              </Button>
+                            )}
+                            {reopenable && (
+                              <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => reopenLiquidation(req)} title="Reopen / send back so the receiver can add or adjust their liquidation">
+                                Reopen
                               </Button>
                             )}
                             {req.accounting?.settled && liqStateOf(req) === "verified" && (
@@ -940,30 +960,45 @@ export default function CashRequests() {
             fields: [{ label: "Notes", value: viewingRequest?.notes, full: true }],
           },
         ]}
-        footerLeft={
-          viewingRequest?.status === "pending" && isAdmin ? (
-            <>
-              <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => openApprove(viewingRequest)} disabled={approveMutation.isPending}>
-                <Check className="h-4 w-4 mr-2" /> Approve
-              </Button>
-              <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: viewingRequest.id })} disabled={rejectMutation.isPending}>
-                <X className="h-4 w-4 mr-2" /> Reject
-              </Button>
-            </>
-          ) : viewingRequest && liqStateOf(viewingRequest) === "awaiting" && (isSubAdmin || isAdmin) ? (
-            <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => openLiquidate(viewingRequest)}>
-              {viewingRequest.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
-            </Button>
-          ) : viewingRequest && liqStateOf(viewingRequest) === "submitted" && isAdmin ? (
-            <Button size="sm" variant="outline" className="border-border text-primary" onClick={() => { setReviewingId(viewingRequest.id); setViewingRequest(null); }}>
-              <Check className="h-4 w-4 mr-2" /> Review Liquidation
-            </Button>
-          ) : viewingRequest && isAdmin && Number(viewingRequest.accounting?.outstandingTotal) > 0 ? (
-            <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => { openSettle(viewingRequest); setViewingRequest(null); }}>
-              Settle Balance
-            </Button>
-          ) : undefined
-        }
+        footerLeft={viewingRequest ? (() => {
+          const vr = viewingRequest;
+          const st = liqStateOf(vr);
+          const canLiq = (isSubAdmin || isAdmin) && (st === "awaiting" || (st === "submitted" && !reviewStartedOf(vr)));
+          return (
+            <div className="flex flex-wrap gap-2">
+              {vr.status === "pending" && isAdmin && (
+                <>
+                  <Button size="sm" variant="outline" className="border-border text-green-400 hover:text-green-300" onClick={() => openApprove(vr)} disabled={approveMutation.isPending}>
+                    <Check className="h-4 w-4 mr-2" /> Approve
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => rejectMutation.mutate({ id: vr.id })} disabled={rejectMutation.isPending}>
+                    <X className="h-4 w-4 mr-2" /> Reject
+                  </Button>
+                </>
+              )}
+              {canLiq && (
+                <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => openLiquidate(vr)}>
+                  {st === "submitted" ? "Edit / Add Liquidation" : vr.liquidation?.status === "rejected" ? "Fix Liquidation" : "Liquidate"}
+                </Button>
+              )}
+              {st === "submitted" && isAdmin && (
+                <Button size="sm" variant="outline" className="border-border text-primary" onClick={() => { setReviewingId(vr.id); setViewingRequest(null); }}>
+                  <Check className="h-4 w-4 mr-2" /> Review Liquidation
+                </Button>
+              )}
+              {isAdmin && Number(vr.accounting?.outstandingTotal) > 0 && (
+                <Button size="sm" variant="outline" className="border-border text-amber-400 hover:text-amber-300" onClick={() => { openSettle(vr); setViewingRequest(null); }}>
+                  Settle Balance
+                </Button>
+              )}
+              {canReopen(vr) && (
+                <Button size="sm" variant="outline" className="border-border text-red-400 hover:text-red-300" onClick={() => reopenLiquidation(vr)} disabled={reopenLiqMutation.isPending}>
+                  <X className="h-4 w-4 mr-2" /> Reopen for correction
+                </Button>
+              )}
+            </div>
+          );
+        })() : undefined}
       />
 
       {/* Per-line liquidation review (admin): accept/reject each expense, live money position */}

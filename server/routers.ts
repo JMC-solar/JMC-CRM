@@ -4378,6 +4378,10 @@ export const appRouter = router({
       const data = fsDocToDataRaw<CashRequest>(snap);
       if (data.status !== 'approved' || !data.received) throw new Error("Cash must be approved and received before it can be liquidated");
       if (data.liquidation?.status === 'verified') throw new Error("This liquidation is already verified and locked");
+      // Once the admin has started reviewing (any line accepted/rejected), the
+      // submitter can no longer overwrite it — the admin must reopen it first.
+      const anyReviewed = (data.liquidation?.items ?? []).some(it => (it.status ?? "pending") !== "pending");
+      if (anyReviewed) throw new Error("The admin has started reviewing this liquidation — ask them to reopen it before adding more.");
 
       // Resolve optional purpose labels for tagged lines.
       const optIds = Array.from(new Set(input.items.map(i => i.purposeOptionId).filter((x): x is number => typeof x === 'number')));
@@ -4502,6 +4506,37 @@ export const appRouter = router({
       if (data.liquidation.submittedBy) await fsInsertOne("notifications", {
         userId: data.liquidation.submittedBy, type: "cash_liquidation_rejected",
         message: `Your liquidation for cash request ${input.id} was sent back for correction${input.reason ? `: ${input.reason}` : ''}.`,
+        link: "/cash-requests", entityId: input.id, read: false,
+      });
+      return { success: true };
+    }),
+
+    // Reopen a submitted OR already-reviewed liquidation so the receiver can add
+    // or adjust lines (e.g. she under-liquidated). Resets every line to pending
+    // for a fresh review. Blocked if anything has been settled — those recorded
+    // amounts would go stale; the admin must undo the settlements first.
+    reopenLiquidation: adminOrAuditorProcedure.input(z.object({ id: z.string(), reason: z.string().optional() })).mutation(async ({ input, ctx }) => {
+      const ref = fdb().collection("cash_requests").doc(input.id);
+      const snap = await ref.get();
+      if (!snap.exists) throw new Error("Cash request not found");
+      const data = fsDocToDataRaw<CashRequest>(snap);
+      if (!data.liquidation) throw new Error("There is no liquidation to reopen");
+      if (data.liquidation.status === 'rejected') throw new Error("This liquidation is already open for the receiver to fix");
+      if ((data.settlements ?? []).length > 0) throw new Error("Remove the recorded settlement(s) first (undo them in Settle), then reopen.");
+      const now = new Date();
+      const liquidation: CashLiquidation = {
+        ...data.liquidation,
+        // Clear the admin's decisions so the re-review starts clean.
+        items: (data.liquidation.items ?? []).map(it => ({ ...it, status: "pending", rejectionReason: null })),
+        status: "rejected",
+        rejectionReason: input.reason ?? "Reopened by the admin — please add or adjust your liquidation.",
+        verifiedBy: null, verifiedByName: null, verifiedAt: null,
+      };
+      await ref.set({ liquidation, updatedAt: now }, { merge: true });
+      await fsAudit(ctx.user.id, ctx.user.name, "reopen", "cash_request", input.id, `Reopened liquidation for ${input.id} so the receiver can add/adjust`);
+      if (data.liquidation.submittedBy) await fsInsertOne("notifications", {
+        userId: data.liquidation.submittedBy, type: "cash_liquidation_rejected",
+        message: `Your liquidation for cash request ${input.id} was reopened — please add or adjust it${input.reason ? `: ${input.reason}` : ''}.`,
         link: "/cash-requests", entityId: input.id, read: false,
       });
       return { success: true };
