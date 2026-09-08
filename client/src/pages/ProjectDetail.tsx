@@ -9,7 +9,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
-import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText } from "lucide-react";
+import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText, Tag } from "lucide-react";
 import { formatPHP } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -650,14 +650,7 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <div className="flex items-start justify-between">
-              <p className="text-xs text-muted-foreground">Total Project Price</p>
-              {canDiscount && (
-                <button type="button" onClick={openDiscount} className="text-[11px] text-primary hover:underline" title="Set a discount off the project price">
-                  {summary && Number(summary.discount) > 0 ? "Edit discount" : "Add discount"}
-                </button>
-              )}
-            </div>
+            <p className="text-xs text-muted-foreground">Total Project Price</p>
             <p className="text-xl font-bold text-foreground">{summary?.totalProjectAmount ? formatPHP(summary.totalProjectAmount) : "Not set"}</p>
             {summary && Number(summary.discount) > 0 && (
               <p className="mt-1 text-[11px] text-amber-400">{formatPHP(summary.subtotal)} − {formatPHP(summary.discount)} discount</p>
@@ -694,10 +687,15 @@ function PaymentsSection({ projectId }: { projectId: number }) {
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-foreground text-lg flex items-center gap-2"><DollarSign className="h-5 w-5 text-green-400" /> Payment Records</CardTitle>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button onClick={openBilling} size="sm" variant="outline" className="border-border">
                 <FileText className="h-4 w-4 mr-1" /> Project Billing
               </Button>
+              {canDiscount && (
+                <Button onClick={openDiscount} size="sm" variant="outline" className="border-amber-500/40 text-amber-400 hover:text-amber-300">
+                  <Tag className="h-4 w-4 mr-1" /> {summary && Number(summary.discount) > 0 ? "Edit Discount" : "Discount"}
+                </Button>
+              )}
               <Button onClick={() => setIsAddOpen(true)} size="sm" className="bg-primary text-primary-foreground">
                 <Plus className="h-4 w-4 mr-1" /> Add Payment
               </Button>
