@@ -105,6 +105,13 @@ router.get("/api/acknowledgement-receipts/:id/print", requireAuth, async (req, r
           if (quotationTotal > 0) synth.push({ description: `Linked quotation${quotationData?.quoteNumber ? ` ${quotationData.quoteNumber}` : ""}`, quantity: 1, unitPrice: quotationTotal, amount: quotationTotal });
           billingItems = synth;
         }
+        // Apply the project's fixed discount (matches the Project Monitor). Shown
+        // as a negative line so the itemized total still equals the amount owed.
+        const discount = Math.max(0, Number(projectData?.discount || 0));
+        if (discount > 0) {
+          totalProjectAmount = Math.max(0, totalProjectAmount - discount);
+          billingItems.push({ description: "Less: Discount", quantity: 1, unitPrice: -discount, amount: -discount });
+        }
       }
     } else if (ack.type === "net_metering_payment") {
       // referenceId is the netMeteringPayment ID - find the NM record

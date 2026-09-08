@@ -457,6 +457,9 @@ export interface Project {
   quotationId: number | null;
   contactId: number | null;
   totalProjectAmount: string | null;
+  // A fixed peso discount subtracted from the all-inclusive project price
+  // (contract + linked quotation + billing). Absent/"0" = no discount.
+  discount?: string | null;
   notes: string | null;
   // What this project has currently deducted from inventory. Absent = nothing yet.
   materialsIssued?: ProjectIssuedItem[];

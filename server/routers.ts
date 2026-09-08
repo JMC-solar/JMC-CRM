@@ -133,20 +133,27 @@ async function recalcQuotationTotals(quotationId: number): Promise<void> {
  * Returns the pieces too so the UI can show a breakdown of how the total is made.
  */
 function projectEffectiveTotal(
-  project: Pick<Project, "totalProjectAmount" | "quotationId">,
+  project: Pick<Project, "totalProjectAmount" | "quotationId" | "discount">,
   billing: ProjectBilling | undefined,
   quotation: Quotation | undefined,
-): { total: number; base: number; quotationTotal: number; billingTotal: number; source: "billing" | "contract_plus_quotation" | "contract" } {
+): { total: number; subtotal: number; discount: number; base: number; quotationTotal: number; billingTotal: number; source: "billing" | "contract_plus_quotation" | "contract" } {
   const base = Number(project.totalProjectAmount || 0);
   const quotationTotal = quotation ? Number(quotation.totalAmount || 0) : 0;
   const billingTotal = billing ? Number(billing.total || 0) : 0;
-  if (billing && billingTotal > 0) {
-    return { total: billingTotal, base, quotationTotal, billingTotal, source: "billing" };
-  }
-  if (quotationTotal > 0) {
-    return { total: base + quotationTotal, base, quotationTotal, billingTotal, source: "contract_plus_quotation" };
-  }
-  return { total: base, base, quotationTotal, billingTotal, source: "contract" };
+  const discount = Math.max(0, Number(project.discount || 0));
+  // The all-inclusive price BEFORE discount (same precedence as before): a saved
+  // billing already merges contract + quotation + extras, else contract + linked
+  // quotation, else the contract alone.
+  const subtotal = (billing && billingTotal > 0)
+    ? billingTotal
+    : quotationTotal > 0
+      ? base + quotationTotal
+      : base;
+  const source: "billing" | "contract_plus_quotation" | "contract" =
+    (billing && billingTotal > 0) ? "billing" : quotationTotal > 0 ? "contract_plus_quotation" : "contract";
+  // The discount comes off the subtotal; never let the total go below zero.
+  const total = Math.max(0, subtotal - discount);
+  return { total, subtotal, discount, base, quotationTotal, billingTotal, source };
 }
 
 // ---- Project materials ↔ inventory ---------------------------------------
@@ -3438,6 +3445,18 @@ export const appRouter = router({
       const materials = await reconcileProjectMaterials(id, ctx.user.id, ctx.user.name || "Unknown");
       return { success: true, materials };
     }),
+    // Set a fixed peso discount off the all-inclusive project price. Set to 0 to
+    // clear it. Admin or sub-admin (both manage projects); audit-logged.
+    setDiscount: protectedProcedure.input(z.object({ projectId: z.number(), discount: z.number().nonnegative() })).mutation(async ({ input, ctx }) => {
+      if (ctx.user.role !== "admin" && ctx.user.role !== "subadmin") {
+        throw new Error("Only an admin or sub-admin can set a project discount");
+      }
+      const project = await fsGetById<Project>("projects", input.projectId);
+      if (!project) throw new Error("Project not found");
+      await fsUpdateOne("projects", input.projectId, { discount: input.discount > 0 ? money(input.discount) : null });
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "project", input.projectId, input.discount > 0 ? `Set project discount to ₱${money(input.discount)}` : "Removed project discount");
+      return { success: true };
+    }),
     updateStage: protectedProcedure.input(z.object({
       id: z.number(),
       stage: z.string(),
@@ -3534,8 +3553,8 @@ export const appRouter = router({
       const quotation = project?.quotationId ? await fsGetById<Quotation>("quotations", project.quotationId) : undefined;
       const eff = project
         ? projectEffectiveTotal(project, billings[0], quotation || undefined)
-        : { total: 0, base: 0, quotationTotal: 0, billingTotal: 0, source: "contract" as const };
-      // baseContractAmount = raw price at creation; totalProjectAmount = all-inclusive price.
+        : { total: 0, subtotal: 0, discount: 0, base: 0, quotationTotal: 0, billingTotal: 0, source: "contract" as const };
+      // baseContractAmount = raw price at creation; totalProjectAmount = all-inclusive price (after discount).
       const baseContractAmount = eff.base;
       const totalProjectAmount = eff.total;
       const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
@@ -3548,6 +3567,7 @@ export const appRouter = router({
         // Breakdown so the UI can show how the total is built up.
         baseContractAmount, linkedQuotationTotal: eff.quotationTotal, billingTotal: eff.billingTotal,
         totalSource: eff.source,
+        subtotal: eff.subtotal, discount: eff.discount,
       };
     }),
     // Central payments list across all projects
@@ -3599,11 +3619,13 @@ export const appRouter = router({
           projectId: project.id,
           projectName: project.name,
           customerName: project.customerName || "-",
-          totalProjectAmount, // all-inclusive price (base + quotation/billing add-ons)
+          totalProjectAmount, // all-inclusive price (base + quotation/billing add-ons, after discount)
           baseContractAmount: eff.base,
           linkedQuotationTotal: eff.quotationTotal,
           billingTotal: eff.billingTotal,
           totalSource: eff.source,
+          subtotal: eff.subtotal,
+          discount: eff.discount,
           totalPaid,
           balance,
           status,
