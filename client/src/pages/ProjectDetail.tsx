@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useAuth } from "@/_core/hooks/useAuth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
@@ -457,10 +458,25 @@ export default function ProjectDetail() {
 function PaymentsSection({ projectId }: { projectId: number }) {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("");
+  const [discountOpen, setDiscountOpen] = useState(false);
+  const [discountValue, setDiscountValue] = useState("");
   const utils = trpc.useUtils();
+  const { user } = useAuth();
+  const canDiscount = user?.role === "admin" || user?.role === "subadmin";
 
   const { data: payments } = trpc.projects.getPayments.useQuery({ projectId });
   const { data: summary } = trpc.projects.paymentSummary.useQuery({ projectId });
+  const setDiscountMutation = trpc.projects.setDiscount.useMutation({
+    onSuccess: () => { toast.success("Discount updated"); setDiscountOpen(false); utils.projects.paymentSummary.invalidate({ projectId }); utils.projects.getById.invalidate({ id: projectId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const openDiscount = () => { setDiscountValue(summary && Number(summary.discount) > 0 ? String(summary.discount) : ""); setDiscountOpen(true); };
+  const handleSaveDiscount = () => {
+    const d = parseFloat(discountValue) || 0;
+    if (d < 0) { toast.error("Discount can't be negative."); return; }
+    if (summary && d > Number(summary.subtotal)) { toast.error(`Discount can't exceed the ${formatPHP(summary.subtotal)} project price.`); return; }
+    setDiscountMutation.mutate({ projectId, discount: d });
+  };
   const { data: paymentMethods } = trpc.config.getOptions.useQuery({ category: "payment_method" });
 
   // --- Project Billing (contract amount + additions = what the client owes) ---
@@ -634,12 +650,22 @@ function PaymentsSection({ projectId }: { projectId: number }) {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="bg-card border-border">
           <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Project Price</p>
+            <div className="flex items-start justify-between">
+              <p className="text-xs text-muted-foreground">Total Project Price</p>
+              {canDiscount && (
+                <button type="button" onClick={openDiscount} className="text-[11px] text-primary hover:underline" title="Set a discount off the project price">
+                  {summary && Number(summary.discount) > 0 ? "Edit discount" : "Add discount"}
+                </button>
+              )}
+            </div>
             <p className="text-xl font-bold text-foreground">{summary?.totalProjectAmount ? formatPHP(summary.totalProjectAmount) : "Not set"}</p>
+            {summary && Number(summary.discount) > 0 && (
+              <p className="mt-1 text-[11px] text-amber-400">{formatPHP(summary.subtotal)} − {formatPHP(summary.discount)} discount</p>
+            )}
             {summary && summary.totalSource === "billing" ? (
-              <p className="mt-1 text-[11px] text-muted-foreground">From saved billing (contract + add-ons)</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">From saved billing (contract + add-ons)</p>
             ) : summary && Number(summary.linkedQuotationTotal) > 0 ? (
-              <p className="mt-1 text-[11px] text-muted-foreground">Contract {formatPHP(summary.baseContractAmount)} + quotation {formatPHP(summary.linkedQuotationTotal)}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">Contract {formatPHP(summary.baseContractAmount)} + quotation {formatPHP(summary.linkedQuotationTotal)}</p>
             ) : null}
           </CardContent>
         </Card>
@@ -760,6 +786,28 @@ function PaymentsSection({ projectId }: { projectId: number }) {
               {addMutation.isPending ? "Recording..." : "Record Payment"}
             </Button>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Discount Dialog — a fixed peso amount off the all-inclusive project price */}
+      <Dialog open={discountOpen} onOpenChange={setDiscountOpen}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">Project Discount</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div className="rounded-md border border-border p-3 text-sm space-y-1">
+              <div className="flex justify-between"><span className="text-muted-foreground">Project price (before discount)</span><span className="tabular-nums text-foreground">{summary ? formatPHP(summary.subtotal) : "-"}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Discount</span><span className="tabular-nums text-amber-400">−{formatPHP(parseFloat(discountValue) || 0)}</span></div>
+              <div className="flex justify-between border-t border-border pt-1 font-medium"><span>New total</span><span className="tabular-nums text-foreground">{summary ? formatPHP(Math.max(0, Number(summary.subtotal) - (parseFloat(discountValue) || 0))) : "-"}</span></div>
+            </div>
+            <div>
+              <Label>Discount amount (₱)</Label>
+              <Input type="number" min="0" step="0.01" value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} placeholder="0.00" className="bg-input border-border" />
+              <p className="text-xs text-muted-foreground mt-1">A fixed peso amount off the total. Set to 0 to remove the discount.</p>
+            </div>
+            <Button className="w-full bg-primary text-primary-foreground" onClick={handleSaveDiscount} disabled={setDiscountMutation.isPending}>
+              {setDiscountMutation.isPending ? "Saving..." : "Save Discount"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

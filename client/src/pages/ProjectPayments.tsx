@@ -224,10 +224,14 @@ export default function ProjectPayments() {
               ...(viewingPayment && viewingPayment.totalSource !== "contract"
                 ? [
                     { label: "Base Contract", value: formatPHP(viewingPayment.baseContractAmount) },
+                    // Use the pre-discount subtotal here so the add-on figure isn't skewed by a discount.
                     ...(viewingPayment.totalSource === "billing"
-                      ? [{ label: "Add-ons (from billing)", value: formatPHP(Number(viewingPayment.totalProjectAmount) - Number(viewingPayment.baseContractAmount)) }]
+                      ? [{ label: "Add-ons (from billing)", value: formatPHP(Number(viewingPayment.subtotal) - Number(viewingPayment.baseContractAmount)) }]
                       : [{ label: "Linked Quotation", value: formatPHP(viewingPayment.linkedQuotationTotal) }]),
                   ]
+                : []),
+              ...(viewingPayment && Number(viewingPayment.discount) > 0
+                ? [{ label: "Discount", value: `−${formatPHP(viewingPayment.discount)}` }]
                 : []),
               { label: "Total Project Price", value: viewingPayment ? formatPHP(viewingPayment.totalProjectAmount) : undefined },
               { label: "Total Paid", value: viewingPayment ? formatPHP(viewingPayment.totalPaid) : undefined },

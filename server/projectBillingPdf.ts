@@ -55,6 +55,10 @@ async function load(projectId: number) {
     }
     if (items.length === 0) items.push({ description: "Project contract amount", sku: null, quantity: 1, unitPrice: contract, amount: contract });
   }
+  // Project-level discount (matches the Project Monitor) — a negative line so the
+  // total and balance stay consistent with what's shown in the app.
+  const discount = Math.max(0, Number(project.discount || 0));
+  if (discount > 0) items.push({ description: "Less: Discount", sku: null, quantity: 1, unitPrice: -discount, amount: -discount });
   const total = items.reduce((s, it) => s + it.amount, 0);
   const totalPaid = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
   return { project, billing, payments, items, total, totalPaid, balance: total - totalPaid };
