@@ -9,7 +9,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ContactCombobox, { contactFullName, type ContactOption } from "@/components/ContactCombobox";
 import { trpc } from "@/lib/trpc";
-import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText, Tag } from "lucide-react";
+import { ArrowLeft, Edit, CheckCircle2, Clock, Wrench, Package, Play, Zap, Plus, DollarSign, Trash2, FileText, Tag, Building2, Check, X } from "lucide-react";
 import { formatPHP } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -455,6 +455,14 @@ export default function ProjectDetail() {
   );
 }
 
+// Deposit badge for a project payment: none / not deposited / awaiting admin / verified.
+function depositBadge(status: string) {
+  if (status === "approved") return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Deposit verified</Badge>;
+  if (status === "pending_approval") return <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30">Awaiting verification</Badge>;
+  if (status === "not_deposited") return <Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30">Not deposited</Badge>;
+  return <Badge variant="outline" className="text-muted-foreground">No deposit info</Badge>;
+}
+
 function PaymentsSection({ projectId }: { projectId: number }) {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("");
@@ -462,10 +470,42 @@ function PaymentsSection({ projectId }: { projectId: number }) {
   const [discountValue, setDiscountValue] = useState("");
   const utils = trpc.useUtils();
   const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const canDiscount = user?.role === "admin" || user?.role === "subadmin";
+  const canDeposit = user?.role === "admin" || user?.role === "subadmin";
+  // Deposit tracking (where each payment was banked) + admin verification.
+  const [depositing, setDepositing] = useState<any>(null);
+  const [depAccount, setDepAccount] = useState("");
+  const [depDeposited, setDepDeposited] = useState(true);
+  const [depDate, setDepDate] = useState("");
+  const [depReference, setDepReference] = useState("");
+  const [depNotes, setDepNotes] = useState("");
 
   const { data: payments } = trpc.projects.getPayments.useQuery({ projectId });
   const { data: summary } = trpc.projects.paymentSummary.useQuery({ projectId });
+  const { data: depositAccounts } = trpc.config.getOptions.useQuery({ category: "deposit_account" });
+  const setDepositMutation = trpc.projects.setPaymentDeposit.useMutation({
+    onSuccess: () => { toast.success("Deposit saved"); setDepositing(null); utils.projects.getPayments.invalidate({ projectId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  const setDepositApprovalMutation = trpc.projects.setPaymentDepositApproval.useMutation({
+    onSuccess: () => { toast.success("Deposit verification updated"); utils.projects.getPayments.invalidate({ projectId }); },
+    onError: (err: any) => toast.error(err.message),
+  });
+  // Keep the deposit dialog pointed at the latest payment data (esp. after verify).
+  const depositingLive = depositing ? (payments ?? []).find((p: any) => p.id === depositing.id) ?? depositing : null;
+  const openDeposit = (p: any) => {
+    setDepositing(p);
+    setDepAccount(p.depositAccount ?? "");
+    setDepDeposited(p.deposited ?? true);
+    setDepDate(p.depositDate ? new Date(p.depositDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10));
+    setDepReference(p.depositReference ?? "");
+    setDepNotes(p.depositNotes ?? "");
+  };
+  const handleSaveDeposit = () => {
+    if (depDeposited && !depAccount) { toast.error("Choose the account it was deposited to."); return; }
+    setDepositMutation.mutate({ paymentId: depositing.id, deposited: depDeposited, depositAccount: depAccount || undefined, depositDate: depDate || undefined, reference: depReference || undefined, notes: depNotes || undefined });
+  };
   const setDiscountMutation = trpc.projects.setDiscount.useMutation({
     onSuccess: () => { toast.success("Discount updated"); setDiscountOpen(false); utils.projects.paymentSummary.invalidate({ projectId }); utils.projects.getById.invalidate({ id: projectId }); },
     onError: (err: any) => toast.error(err.message),
@@ -726,6 +766,7 @@ function PaymentsSection({ projectId }: { projectId: number }) {
                     <th className="text-left py-2 px-3">Reference</th>
                     <th className="text-left py-2 px-3">Notes</th>
                     <th className="text-left py-2 px-3">Recorded By</th>
+                    <th className="text-left py-2 px-3">Deposit</th>
                     <th className="text-right py-2 px-3"></th>
                   </tr>
                 </thead>
@@ -738,7 +779,18 @@ function PaymentsSection({ projectId }: { projectId: number }) {
                       <td className="py-2 px-3 text-foreground">{p.paymentReference || "-"}</td>
                       <td className="py-2 px-3 text-muted-foreground">{p.notes || "-"}</td>
                       <td className="py-2 px-3 text-muted-foreground text-xs">{p.createdByName || "-"}</td>
+                      <td className="py-2 px-3">
+                        <div className="flex flex-col items-start gap-0.5">
+                          {depositBadge(p.depositStatus)}
+                          {p.depositAccount && <span className="text-[11px] text-muted-foreground">{p.depositAccount}</span>}
+                        </div>
+                      </td>
                       <td className="py-2 px-3 text-right flex items-center gap-1 justify-end">
+                        {canDeposit && (
+                          <Button variant="ghost" size="sm" onClick={() => openDeposit(p)} title="Record / verify deposit" className="text-amber-400 hover:text-amber-300 h-7 w-7 p-0">
+                            <Building2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         <Button variant="ghost" size="sm" onClick={() => handleAck(p.id)} title="Generate Acknowledgement Receipt" className="text-blue-400 hover:text-blue-300 h-7 w-7 p-0">
                           <CheckCircle2 className="h-3.5 w-3.5" />
                         </Button>
@@ -806,6 +858,72 @@ function PaymentsSection({ projectId }: { projectId: number }) {
               {setDiscountMutation.isPending ? "Saving..." : "Save Discount"}
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Deposit Dialog — where this payment was banked + admin verification */}
+      <Dialog open={!!depositing} onOpenChange={(o) => { if (!o) setDepositing(null); }}>
+        <DialogContent className="max-w-md bg-card border-border">
+          <DialogHeader><DialogTitle className="text-foreground">Payment Deposit</DialogTitle></DialogHeader>
+          {depositingLive && (
+            <div className="space-y-4">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Payment</span>
+                <span className="font-medium text-foreground">{formatPHP(depositingLive.amount)} · {new Date(depositingLive.paymentDate).toLocaleDateString()}</span>
+              </div>
+
+              {/* Admin verification banner (admins act; others see the status). */}
+              <div className="rounded-md border border-border p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Verification</span>
+                  {depositBadge(depositingLive.depositStatus)}
+                </div>
+                {depositingLive.depositApproved && depositingLive.depositApprovedByName && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">Verified by {depositingLive.depositApprovedByName}</p>
+                )}
+                {isAdmin && (
+                  <div className="mt-2 flex gap-2">
+                    {!depositingLive.depositApproved ? (
+                      <Button size="sm" className="bg-green-600 text-white hover:bg-green-700" disabled={!depositingLive.deposited || setDepositApprovalMutation.isPending} onClick={() => setDepositApprovalMutation.mutate({ paymentId: depositingLive.id, approved: true })} title={!depositingLive.deposited ? "Mark it deposited first" : "Verify the deposit"}>
+                        <Check className="h-4 w-4 mr-1" /> Verify deposit
+                      </Button>
+                    ) : (
+                      <Button size="sm" variant="outline" className="border-border text-red-400" disabled={setDepositApprovalMutation.isPending} onClick={() => setDepositApprovalMutation.mutate({ paymentId: depositingLive.id, approved: false })}>
+                        <X className="h-4 w-4 mr-1" /> Un-verify
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <label className="flex items-center gap-2 text-sm text-foreground">
+                <input type="checkbox" checked={depDeposited} onChange={(e) => setDepDeposited(e.target.checked)} className="h-4 w-4" />
+                This payment has been deposited
+              </label>
+              <div>
+                <Label>Deposited to (bank account) {depDeposited ? "*" : ""}</Label>
+                <select value={depAccount} onChange={(e) => setDepAccount(e.target.value)} className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground">
+                  <option value="">Select account…</option>
+                  {depositAccounts?.map((o: any) => <option key={o.id} value={o.value}>{o.value}</option>)}
+                </select>
+                {(!depositAccounts || depositAccounts.length === 0) && (
+                  <p className="mt-1 text-[11px] text-amber-400">No deposit accounts yet — add them in Settings → Deposit Accounts.</p>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label>Deposit date</Label><Input type="date" value={depDate} onChange={(e) => setDepDate(e.target.value)} className="bg-input border-border" /></div>
+                <div><Label>Slip / reference</Label><Input value={depReference} onChange={(e) => setDepReference(e.target.value)} className="bg-input border-border" placeholder="Deposit slip #" /></div>
+              </div>
+              <div>
+                <Label>Notes</Label>
+                <Input value={depNotes} onChange={(e) => setDepNotes(e.target.value)} className="bg-input border-border" placeholder="Optional" />
+              </div>
+              <p className="text-[11px] text-muted-foreground">Saving any change re-sets the admin verification — it must be verified again.</p>
+              <Button className="w-full bg-primary text-primary-foreground" onClick={handleSaveDeposit} disabled={setDepositMutation.isPending}>
+                {setDepositMutation.isPending ? "Saving..." : "Save Deposit"}
+              </Button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

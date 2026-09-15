@@ -570,6 +570,20 @@ export interface ProjectPayment {
   createdBy: number | null;
   createdByName: string | null;
   createdAt: Date;
+  // Deposit tracking: which bank account this payment was banked into, claimed
+  // by whoever recorded it, then verified by an admin. Absent = not recorded yet.
+  // Any edit to the deposit clears the admin verification (must be re-checked).
+  deposited?: boolean;
+  depositAccount?: string | null;   // from the deposit_account config (same list as retail)
+  depositDate?: Date | null;
+  depositReference?: string | null; // deposit slip / reference number
+  depositNotes?: string | null;
+  depositRecordedBy?: number | null;
+  depositRecordedByName?: string | null;
+  depositApproved?: boolean;        // admin-verified the deposit is genuine
+  depositApprovedBy?: number | null;
+  depositApprovedByName?: string | null;
+  depositApprovedAt?: Date | null;
 }
 
 // ============ NET METERING PAYMENTS ============

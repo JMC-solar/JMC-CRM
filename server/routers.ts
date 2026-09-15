@@ -3516,7 +3516,12 @@ export const appRouter = router({
       return payments
         .slice()
         .sort((a, b) => b.paymentDate.getTime() - a.paymentDate.getTime())
-        .map(p => ({ ...p, lastAckId: ackMap.get(p.id) || null }));
+        .map(p => ({
+          ...p,
+          lastAckId: ackMap.get(p.id) || null,
+          // Deposit badge: none / not_deposited / pending_approval / approved.
+          depositStatus: p.depositApproved ? "approved" : p.deposited ? "pending_approval" : p.depositAccount ? "not_deposited" : "none",
+        }));
     }),
     addPayment: protectedProcedure.input(z.object({
       projectId: z.number(),
@@ -3542,6 +3547,45 @@ export const appRouter = router({
     deletePayment: protectedProcedure.input(z.object({ id: z.number(), projectId: z.number() })).mutation(async ({ input, ctx }) => {
       await fsDeleteOne("project_payments", input.id);
       await fsAudit(ctx.user.id, ctx.user.name, "delete", "project_payment", input.id, `Deleted payment for project #${input.projectId}`);
+      return { success: true };
+    }),
+    // Record where a payment was deposited (bank account + slip). Whoever records
+    // it claims it's deposited; any edit clears the admin's verification.
+    setPaymentDeposit: protectedProcedure.input(z.object({
+      paymentId: z.number(),
+      deposited: z.boolean(),
+      depositAccount: z.string().optional(),
+      depositDate: z.string().optional(),
+      reference: z.string().optional(),
+      notes: z.string().optional(),
+    })).mutation(async ({ input, ctx }) => {
+      if (!["admin", "subadmin"].includes(ctx.user.role)) throw new Error("Only Admin or Sub Admin can record a deposit");
+      const payment = await fsGetById<ProjectPayment>("project_payments", input.paymentId);
+      if (!payment) throw new Error("Payment not found");
+      await fsUpdateOne("project_payments", input.paymentId, {
+        deposited: input.deposited,
+        depositAccount: input.depositAccount ?? null,
+        depositDate: input.depositDate ? new Date(input.depositDate) : null,
+        depositReference: input.reference ?? null,
+        depositNotes: input.notes ?? null,
+        depositRecordedBy: ctx.user.id,
+        depositRecordedByName: ctx.user.name || "Unknown",
+        // Any edit clears admin verification — it must be re-confirmed.
+        depositApproved: false, depositApprovedBy: null, depositApprovedByName: null, depositApprovedAt: null,
+      });
+      await fsAudit(ctx.user.id, ctx.user.name, "update", "project_payment", input.paymentId, `Deposit for payment #${input.paymentId} (${money(Number(payment.amount))}): ${input.deposited ? `deposited to ${input.depositAccount ?? "?"}` : "not deposited"}`);
+      return { success: true };
+    }),
+    // Admin-only: verify (or un-verify) that a claimed deposit is genuine.
+    setPaymentDepositApproval: adminProcedure.input(z.object({ paymentId: z.number(), approved: z.boolean() })).mutation(async ({ input, ctx }) => {
+      const payment = await fsGetById<ProjectPayment>("project_payments", input.paymentId);
+      if (!payment) throw new Error("Payment not found");
+      if (input.approved && !payment.deposited) throw new Error("Can't verify a deposit that hasn't been marked deposited");
+      const now = new Date();
+      await fsUpdateOne("project_payments", input.paymentId, input.approved
+        ? { depositApproved: true, depositApprovedBy: ctx.user.id, depositApprovedByName: ctx.user.name || "Admin", depositApprovedAt: now }
+        : { depositApproved: false, depositApprovedBy: null, depositApprovedByName: null, depositApprovedAt: null });
+      await fsAudit(ctx.user.id, ctx.user.name, input.approved ? "approve" : "reject", "project_payment", input.paymentId, `${input.approved ? "Verified" : "Un-verified"} deposit for payment #${input.paymentId} (${money(Number(payment.amount))})`);
       return { success: true };
     }),
     paymentSummary: protectedProcedure.input(z.object({ projectId: z.number() })).query(async ({ input }) => {
